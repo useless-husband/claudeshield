@@ -117,6 +117,16 @@ func TestCorruptMapIsAnError(t *testing.T) {
 	}
 }
 
+func TestJSONWalkSkipsKeys(t *testing.T) {
+	m := New()
+	in := map[string]any{"base64": "A123456789", "text": "A123456789"}
+	out, n, _ := m.MaskJSON(strict, in, map[string]bool{"base64": true})
+	o := out.(map[string]any)
+	if n != 1 || o["base64"] != "A123456789" || o["text"] != "⟦TWID_001⟧" {
+		t.Fatalf("got %#v n=%d", o, n)
+	}
+}
+
 func TestJSONWalkKeepsShape(t *testing.T) {
 	m := New()
 	in := map[string]any{
@@ -124,7 +134,7 @@ func TestJSONWalkKeepsShape(t *testing.T) {
 		"file": map[string]any{"filePath": "/x/a.txt", "content": "客戶：王小明\n電話 0912345678", "numLines": 2},
 		"list": []any{"A123456789", 3, true, nil},
 	}
-	out, n, kinds := m.MaskJSON(strict, in)
+	out, n, kinds := m.MaskJSON(strict, in, nil)
 	if n != 3 || kinds["PHONE"] != 1 || kinds["NAME"] != 1 || kinds["TWID"] != 1 {
 		t.Fatalf("n=%d kinds=%v", n, kinds)
 	}

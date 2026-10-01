@@ -83,6 +83,9 @@ type Global struct {
 	// "absent" means the default (on) and an explicit false sticks.
 	GlobalMasking *bool    `json:"global_masking,omitempty"`
 	AllowHosts    []string `json:"allow_hosts,omitempty"`
+	// Allow lists values never masked in ordinary sessions (same syntax as
+	// the workspace allow list).
+	Allow []string `json:"allow,omitempty"`
 	// Acknowledged maps a finding ID to the fingerprint the user accepted.
 	// If the underlying value changes, the fingerprint no longer matches and
 	// the finding blocks again.

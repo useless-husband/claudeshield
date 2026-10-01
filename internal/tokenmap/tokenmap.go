@@ -248,9 +248,10 @@ func HasTokens(s string) bool {
 
 // MaskJSON walks a decoded JSON value (maps, slices, strings, numbers) and
 // masks every string leaf. Object keys are left alone so the shape, which
-// Claude Code validates, never changes. It returns the new value, how many
-// values were masked, and the kinds found.
-func (m *Map) MaskJSON(d *detect.Detector, v any) (any, int, map[string]int) {
+// Claude Code validates, never changes. Values under a key in skipKeys (for
+// example "base64" image data) are left untouched. It returns the new value,
+// how many values were masked, and the kinds found.
+func (m *Map) MaskJSON(d *detect.Detector, v any, skipKeys map[string]bool) (any, int, map[string]int) {
 	kinds := map[string]int{}
 	n := 0
 	var walk func(any) any
@@ -266,6 +267,10 @@ func (m *Map) MaskJSON(d *detect.Detector, v any) (any, int, map[string]int) {
 		case map[string]any:
 			cp := make(map[string]any, len(x))
 			for k, e := range x {
+				if skipKeys[k] {
+					cp[k] = e
+					continue
+				}
 				cp[k] = walk(e)
 			}
 			return cp
