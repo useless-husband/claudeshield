@@ -141,15 +141,17 @@ var rules = []rule{
 	{kind: "NAME", cat: PII, prio: 40, group: 1,
 		re: regexp.MustCompile(`(?:姓名|客戶|客户|聯絡人|联系人|負責人|收件人|申請人|承辦人|員工|病患|學生|學員)\s*[：:]\s*([\p{Han}]{2,4})`)},
 	{kind: "NAME", cat: PII, prio: 40, group: 1,
+		re: regexp.MustCompile(`(?:出席|列席|與會|參加者|參與者|成員|收件者|寄件者|致|敬啟者)\s*[：:]\s*([\p{Han}]{2,4})`)},
+	{kind: "NAME", cat: PII, prio: 40, group: 1,
 		re: regexp.MustCompile(`\b(?:[Nn]ame|NAME|[Cc]ustomer|[Cc]lient|[Cc]ontact)\s*[:=]\s*["']?([A-Z][a-z]+(?:[ \t][A-Z][a-z]+){1,2})`)},
 
 	// --- money -------------------------------------------------------------
 	{kind: "AMOUNT", cat: Finance, prio: 35,
-		re: regexp.MustCompile(`(?:NT\$|NTD|TWD|US\$|USD|HK\$|RMB|CNY|JPY|EUR|€|£|¥|＄)\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:萬|億|千|百萬|[kKmM]\b|million\b|billion\b))?`)},
+		re: regexp.MustCompile(`(?:NT\$|NTD|TWD|US\$|USD|HK\$|RMB|CNY|JPY|EUR|€|£|¥|＄)\s?\d+(?:,\d{3})*(?:\.\d+)?(?:\s?(?:萬|億|千|百萬|[kKmM]\b|million\b|billion\b))?`)},
 	{kind: "AMOUNT", cat: Finance, prio: 35,
 		re: regexp.MustCompile(`\$\s?(?:\d{1,3}(?:,\d{3})+|\d{3,})(?:\.\d+)?(?:\s?(?:[kKmM]\b|million\b|billion\b))?`)},
 	{kind: "AMOUNT", cat: Finance, prio: 35,
-		re: regexp.MustCompile(`\d[\d,]*(?:\.\d+)?\s?(?:萬元|億元|千元|百萬元|元|圓|萬|億|美元|美金|台幣|新台幣|日圓|人民幣|歐元)`)},
+		re: regexp.MustCompile(`\d+(?:,\d{3})*(?:\.\d+)?\s?(?:萬元|億元|千元|百萬元|元|圓|萬|億|美元|美金|台幣|新台幣|日圓|人民幣|歐元)`)},
 	{kind: "AMOUNT", cat: Finance, prio: 35, group: 1,
 		re: regexp.MustCompile(`(?i)(?:報價|營收|營業額|金額|薪資|薪水|月薪|年薪|時薪|預算|成本|售價|單價|總價|總額|獲利|淨利|毛利|price|salary|revenue|amount|budget|cost)\s*[：:=]\s*([\d,]*\d(?:\.\d+)?)`)},
 	{kind: "BANKACCT", cat: Finance, prio: 45, group: 1,
@@ -268,6 +270,13 @@ func (d *Detector) Find(s string) []Match {
 				continue
 			}
 			add(st, en, r.kind, r.cat, r.prio)
+		}
+	}
+	if d.cfg.Profile == Strict {
+		d.tableMatches(s, add)
+		if d.cfg.Categories == nil || d.cfg.Categories[PII] {
+			nameRuns(s, add)
+			honorificNames(s, add)
 		}
 	}
 	if d.extHost != nil {
@@ -527,6 +536,19 @@ var placeholderWords = []string{
 	"password", "passwd", "secret", "token", "changeme", "change_me", "example",
 	"your", "xxxx", "****", "....", "dummy", "placeholder", "redacted", "<", ">",
 	"${", "{{", "%(", "$(", "process.env", "os.environ", "getenv", "env(", "none", "null", "undefined",
+}
+
+func startsWithSurname(v string) bool {
+	r, _ := utf8.DecodeRuneInString(v)
+	if surnames1[r] {
+		return true
+	}
+	for _, c := range surnames2 {
+		if strings.HasPrefix(v, c) {
+			return true
+		}
+	}
+	return false
 }
 
 // plausibleSecret filters out values that are obviously not real secrets:
