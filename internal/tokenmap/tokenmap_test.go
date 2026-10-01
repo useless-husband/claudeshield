@@ -244,3 +244,18 @@ func FuzzRoundTrip(f *testing.F) {
 		}
 	})
 }
+
+func TestKnownTerms(t *testing.T) {
+	m := New()
+	m.Mask(strict, "客戶：王小明 金額：100 電話 0912345678 a@b.co")
+	k := m.KnownTerms()
+	if len(k["NAME"]) != 1 || k["NAME"][0] != "王小明" || len(k["PHONE"]) != 1 || len(k["AMOUNT"]) != 0 {
+		t.Fatalf("known terms %v", k)
+	}
+	// The name is now masked even without the "客戶：" context.
+	d := detect.New(detect.Config{Profile: detect.Basic, Terms: k})
+	out, _ := m.Mask(d, "王小明 called")
+	if out != "⟦NAME_001⟧ called" {
+		t.Fatalf("got %q", out)
+	}
+}

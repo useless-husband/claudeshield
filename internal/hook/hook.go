@@ -200,26 +200,57 @@ func (h *handler) mapPath() (string, error) {
 
 var errVaultClosed = errors.New("vault closed")
 
-// detectorFor returns the detector for content at path (or the session's
-// working directory when path is empty), or nil when nothing should be masked.
-func (h *handler) detectorFor(path string) *detect.Detector {
+// detectorConfig returns the detection settings for content at path (or the
+// session's working directory when path is empty); ok is false when nothing
+// should be masked.
+func (h *handler) detectorConfig(path string) (detect.Config, bool) {
 	h.context()
 	if path != "" {
 		if ws, ok, err := config.FindWorkspace(filepath.Dir(path)); ok && err == nil {
-			return detect.New(ws.DetectorConfig())
+			return ws.DetectorConfig(), true
 		}
 	}
 	if h.inWS && h.wsErr == nil {
-		return detect.New(h.ws.DetectorConfig())
+		return h.ws.DetectorConfig(), true
 	}
 	if h.inWS {
 		// Unreadable marker: mask everything with default categories.
-		return detect.New(detect.Config{Profile: detect.Strict, Allow: detect.DefaultAllow})
+		return detect.Config{Profile: detect.Strict, Allow: detect.DefaultAllow}, true
 	}
 	if !h.env.Global.MaskingOn() {
+		return detect.Config{}, false
+	}
+	return detect.Config{Profile: detect.Basic, Allow: append(append([]string(nil), detect.DefaultAllow...), h.env.Global.Allow...)}, true
+}
+
+// detectorFor builds a detector that also matches every value already in the
+// token table, read-only. It returns nil when nothing should be masked.
+func (h *handler) detectorFor(path string) *detect.Detector {
+	cfg, ok := h.detectorConfig(path)
+	if !ok {
 		return nil
 	}
-	return detect.New(detect.Config{Profile: detect.Basic, Allow: append(append([]string(nil), detect.DefaultAllow...), h.env.Global.Allow...)})
+	if mp, err := h.mapPath(); err == nil {
+		if m, err := tokenmap.Load(mp); err == nil {
+			cfg = withTerms(cfg, m.KnownTerms())
+		}
+	}
+	return detect.New(cfg)
+}
+
+func withTerms(c detect.Config, extra map[string][]string) detect.Config {
+	if len(extra) == 0 {
+		return c
+	}
+	terms := map[string][]string{}
+	for k, v := range c.Terms {
+		terms[k] = append(terms[k], v...)
+	}
+	for k, v := range extra {
+		terms[k] = append(terms[k], v...)
+	}
+	c.Terms = terms
+	return c
 }
 
 func (h *handler) allowHosts() []string {
@@ -339,8 +370,9 @@ func (h *handler) userPrompt() error {
 		path, err := h.mapPath()
 		var masked string
 		if err == nil {
+			cfg, _ := h.detectorConfig("")
 			err = tokenmap.Update(path, func(m *tokenmap.Map) error {
-				masked, _ = m.Mask(d, h.in.Prompt)
+				masked, _ = m.Mask(detect.New(withTerms(cfg, m.KnownTerms())), h.in.Prompt)
 				return nil
 			})
 		}
@@ -430,6 +462,45 @@ func stripPasteMarkers(s string) string {
 
 var localTools = map[string]bool{"Read": true, "Write": true, "Edit": true, "MultiEdit": true, "NotebookEdit": true, "Glob": true, "Grep": true, "LS": true}
 var shellTools = map[string]bool{"Bash": true, "PowerShell": true, "Monitor": true}
+var writeTools = map[string]bool{"Write": true, "Edit": true, "MultiEdit": true, "NotebookEdit": true}
+
+// ownFile reports whether abs is inside claudeshield's state directory or the
+// vault's claudeshield folder. The token tables there hold the real values,
+// and the config decides what is protected, so Claude never touches either.
+func (h *handler) ownFile(abs string) bool {
+	abs = filepath.Clean(abs)
+	for _, dir := range h.ownDirs() {
+		if abs == dir || strings.HasPrefix(abs, dir+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *handler) ownDirs() []string {
+	dirs := []string{filepath.Clean(h.env.Paths.State)}
+	if vault.Configured(h.env.Global) {
+		dirs = append(dirs, filepath.Clean(vault.DataDir(h.env.Paths, h.env.Global)))
+	}
+	return dirs
+}
+
+func (h *handler) shellTouchesOwnFiles(cmd string) bool {
+	if strings.Contains(cmd, ".claudeshield") {
+		return true
+	}
+	for _, d := range h.ownDirs() {
+		if d != "" && d != "." && strings.Contains(cmd, d) {
+			return true
+		}
+	}
+	return false
+}
+
+func selfProtectReason() string {
+	return i18n.T("ClaudeShield：這是 ClaudeShield 自己的設定或代號對照表（裡面有真實資料），Claude 不能讀取或修改。要改設定請使用者自己在終端機操作。",
+		"ClaudeShield: this is ClaudeShield's own configuration or placeholder table (it holds the real values), which Claude may not read or change. The user can change settings in a terminal.")
+}
 
 var binaryExt = map[string]bool{
 	".pdf": true, ".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".heic": true, ".tiff": true, ".bmp": true,
@@ -487,6 +558,9 @@ func (h *handler) decidePreTool() decision {
 			if !filepath.IsAbs(abs) {
 				abs = filepath.Join(h.in.Cwd, abs)
 			}
+			if h.ownFile(abs) || (writeTools[tool] && filepath.Base(abs) == config.WorkspaceFile) {
+				return deny(selfProtectReason())
+			}
 			if ws, ok, _ := config.FindWorkspace(filepath.Dir(abs)); ok {
 				if ws.Protected(abs) {
 					return deny(i18n.Tf("ClaudeShield：%s 在受保護的範圍（%s），Claude 不能讀取或修改。需要用到的話，請使用者用 claudeshield mask 產生遮罩版放到別的資料夾。",
@@ -498,6 +572,12 @@ func (h *handler) decidePreTool() decision {
 						"ClaudeShield: %s is a binary file (PDF, image or Office document) whose content cannot be masked. Convert it to text first, e.g. `textutil -convert txt file.docx` or `pdftotext file.pdf`, and read the .txt instead.", abs))
 				}
 			}
+		}
+	}
+
+	if shellTools[tool] {
+		if cmd, _ := h.in.ToolInput["command"].(string); h.shellTouchesOwnFiles(cmd) {
+			return deny(selfProtectReason())
 		}
 	}
 
@@ -681,8 +761,8 @@ func (h *handler) postTool() error {
 			}
 		}
 	}
-	d := h.detectorFor(path)
-	if d == nil || h.in.ToolResponse == nil {
+	cfg, ok := h.detectorConfig(path)
+	if !ok || h.in.ToolResponse == nil {
 		return nil
 	}
 	skip := map[string]bool{"base64": true}
@@ -700,7 +780,7 @@ func (h *handler) postTool() error {
 	mp, err := h.mapPath()
 	if err == nil {
 		err = tokenmap.Update(mp, func(m *tokenmap.Map) error {
-			masked, n, kinds = m.MaskJSON(d, h.in.ToolResponse, skip)
+			masked, n, kinds = m.MaskJSON(detect.New(withTerms(cfg, m.KnownTerms())), h.in.ToolResponse, skip)
 			return nil
 		})
 	}
@@ -708,7 +788,7 @@ func (h *handler) postTool() error {
 	if err != nil {
 		// Without the table, mask with throwaway placeholders that can never
 		// be expanded. Claude still never sees the values.
-		masked, n, kinds = tokenmap.New().MaskJSON(d, h.in.ToolResponse, skip)
+		masked, n, kinds = tokenmap.New().MaskJSON(detect.New(cfg), h.in.ToolResponse, skip)
 		masked = redactAll(masked)
 		note = i18n.T(" 保險箱沒有打開，這些值換成了無法還原的 ⟦REDACTED⟧。", " The vault is closed, so they were replaced with unrecoverable ⟦REDACTED⟧ markers.")
 	}

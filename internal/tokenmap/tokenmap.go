@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/useless-husband/claudeshield/internal/detect"
 )
@@ -177,6 +178,37 @@ func (m *Map) TokenFor(kind, value string) string {
 	m.entries = append(m.entries, Entry{Token: t, Kind: kind, Value: value, Created: m.now().UTC().Truncate(time.Second)})
 	m.dirty = true
 	return t
+}
+
+// KnownTerms returns stored values grouped by kind, for literal matching.
+//
+// Once a value has been masked anywhere, it should be masked everywhere,
+// even where no pattern would recognise it again: a name found next to
+// "客戶：" must still be hidden when it later appears on its own. Short values
+// and money amounts are left out, because as bare literals ("100", "250萬")
+// they would mask unrelated text.
+func (m *Map) KnownTerms() map[string][]string {
+	out := map[string][]string{}
+	for _, e := range m.entries {
+		if e.Kind == "AMOUNT" || utf8.RuneCountInString(e.Value) < 3 || len(e.Value) < 4 {
+			continue
+		}
+		if digitsOnly(e.Value) && len(e.Value) < 7 {
+			continue
+		}
+		out[e.Kind] = append(out[e.Kind], e.Value)
+	}
+	return out
+}
+
+func digitsOnly(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9') && c != ',' && c != '.' && c != '-' && c != ' ' {
+			return false
+		}
+	}
+	return true
 }
 
 // Value returns the real value behind a placeholder.
