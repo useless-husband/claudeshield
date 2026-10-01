@@ -56,7 +56,11 @@ func (c *cli) initWorkspace(args []string) error {
 		}
 	}
 	local := filepath.Join(dir, ".claude", "settings.local.json")
-	if err := settings.MergeWorkspaceSettings(local, ws); err != nil {
+	own := []string{config.Canonical(c.p.State)}
+	if vault.Configured(c.g) {
+		own = append(own, vault.DataDir(c.p, c.g))
+	}
+	if err := settings.MergeWorkspaceSettings(local, ws, own...); err != nil {
 		return err
 	}
 	// Keep the marker (it lists client names) and the local settings out of git.

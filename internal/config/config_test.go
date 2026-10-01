@@ -62,21 +62,27 @@ func TestBadMarkerStillCountsAsWorkspace(t *testing.T) {
 func TestSandboxStrict(t *testing.T) {
 	root := t.TempDir()
 	ws := Workspace{Root: root}
-	if ws.SandboxStrict() {
+	if ws.SandboxStrict("") {
 		t.Fatal("no settings is not strict")
 	}
 	os.MkdirAll(filepath.Join(root, ".claude"), 0o700)
 	os.WriteFile(filepath.Join(root, ".claude", "settings.json"), []byte(`{"sandbox":{"enabled":true}}`), 0o600)
-	if ws.SandboxStrict() {
+	if ws.SandboxStrict("") {
 		t.Fatal("escape hatch still open")
 	}
 	os.WriteFile(filepath.Join(root, ".claude", "settings.local.json"), []byte(`{"sandbox":{"allowUnsandboxedCommands":false}}`), 0o600)
-	if !ws.SandboxStrict() {
+	if !ws.SandboxStrict("") {
 		t.Fatal("project + local should combine to strict")
 	}
 	os.WriteFile(filepath.Join(root, ".claude", "settings.local.json"), []byte(`{"sandbox":{"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":false}}`), 0o600)
-	if ws.SandboxStrict() {
+	if ws.SandboxStrict("") {
 		t.Fatal("without auto-allow the wrapper would prompt every time")
+	}
+	os.WriteFile(filepath.Join(root, ".claude", "settings.local.json"), []byte(`{"sandbox":{"allowUnsandboxedCommands":false}}`), 0o600)
+	user := filepath.Join(t.TempDir(), "settings.json")
+	os.WriteFile(user, []byte(`{"sandbox":{"excludedCommands":["docker *"]}}`), 0o600)
+	if ws.SandboxStrict(user) {
+		t.Fatal("a user-level excluded command runs outside the sandbox")
 	}
 }
 

@@ -356,25 +356,41 @@ func matchSegs(p, s []string) bool {
 	return len(s) == 0
 }
 
-// SandboxStrict reports whether the workspace's Claude Code settings turn the
-// sandbox on with no unsandboxed escape hatch and with sandboxed commands
-// auto-allowed. Local settings override project settings, as in Claude Code.
-func (w Workspace) SandboxStrict() bool {
-	enabled, noEscape, autoAllow := false, false, true
-	for _, name := range []string{"settings.json", "settings.local.json"} {
-		b, err := os.ReadFile(filepath.Join(w.Root, ".claude", name))
+// SandboxStrict reports whether every shell command in the workspace is
+// confined by Claude Code's sandbox and auto-allowed there: the sandbox is
+// enabled with no unsandboxed escape hatch, sandboxed commands are
+// auto-allowed, and no command is excluded from the sandbox at any level
+// (excludedCommands entries run outside it). Only then does returning
+// "allow" for a wrapped command grant nothing the sandbox would not.
+// userSettings is ~/.claude/settings.json; local settings override project
+// settings, as in Claude Code.
+func (w Workspace) SandboxStrict(userSettings string) bool {
+	enabled, noEscape, autoAllow, excluded := false, false, true, false
+	files := []string{userSettings, filepath.Join(w.Root, ".claude", "settings.json"), filepath.Join(w.Root, ".claude", "settings.local.json")}
+	for i, path := range files {
+		if path == "" {
+			continue
+		}
+		b, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
 		var s struct {
 			Sandbox *struct {
-				Enabled                  *bool `json:"enabled"`
-				AllowUnsandboxedCommands *bool `json:"allowUnsandboxedCommands"`
-				AutoAllowBashIfSandboxed *bool `json:"autoAllowBashIfSandboxed"`
+				Enabled                  *bool    `json:"enabled"`
+				AllowUnsandboxedCommands *bool    `json:"allowUnsandboxedCommands"`
+				AutoAllowBashIfSandboxed *bool    `json:"autoAllowBashIfSandboxed"`
+				ExcludedCommands         []string `json:"excludedCommands"`
 			} `json:"sandbox"`
 		}
 		if json.Unmarshal(b, &s) != nil || s.Sandbox == nil {
 			continue
+		}
+		if len(s.Sandbox.ExcludedCommands) > 0 {
+			excluded = true
+		}
+		if i == 0 {
+			continue // user level only matters for exclusions here
 		}
 		if s.Sandbox.Enabled != nil {
 			enabled = *s.Sandbox.Enabled
@@ -386,5 +402,5 @@ func (w Workspace) SandboxStrict() bool {
 			autoAllow = *s.Sandbox.AutoAllowBashIfSandboxed
 		}
 	}
-	return enabled && noEscape && autoAllow
+	return enabled && noEscape && autoAllow && !excluded
 }

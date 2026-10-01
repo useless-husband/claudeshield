@@ -713,7 +713,7 @@ func (h *handler) shell() decision {
 	if h.inWS && r.Network && !r.AllHostsAllowed(allow) {
 		return ask(i18n.Tf("ClaudeShield：這個指令會連到白名單以外的地方：%s。", "ClaudeShield: this command connects to a destination not on the allowlist: %s.", where))
 	}
-	wrap := h.inWS && h.in.ToolName == "Bash" && h.ws.SandboxStrict()
+	wrap := h.inWS && h.in.ToolName == "Bash" && h.ws.SandboxStrict(filepath.Join(h.env.Paths.ClaudeDir, "settings.json"))
 	if !hasTokens && !wrap {
 		return decision{}
 	}

@@ -146,7 +146,7 @@ func Run(o Options) Report {
 			})
 		}
 	}
-	if inWS && wsErr == nil && !ws.SandboxStrict() {
+	if inWS && wsErr == nil && !ws.SandboxStrict(filepath.Join(o.Paths.ClaudeDir, "settings.json")) {
 		r.Findings = append(r.Findings, Finding{ID: "workspace.sandbox", Severity: Block, Fingerprint: Fingerprint(ws.Root),
 			Title:  i18n.T("敏感資料夾的沙盒沒有開好", "The sensitive workspace's sandbox is not set up"),
 			Detail: i18n.T("沒有沙盒時，指令執行失敗的輸出不會經過遮罩，網路也只靠 hook 判斷。", "Without the sandbox, the output of failing commands is not masked and network access rests on the hook alone."),

@@ -263,9 +263,17 @@ func Installed(path string) (bool, string) {
 //     runs under the OS sandbox (macOS Seatbelt);
 //   - protected paths unreadable by the sandbox and by Claude's file tools;
 //   - the network allowlist pre-seeded with the workspace's allowed hosts.
-func WorkspaceSettings(ws config.Workspace) map[string]any {
+func WorkspaceSettings(ws config.Workspace, ownDirs ...string) map[string]any {
 	var denyRead []any
 	var deny []any
+	// claudeshield's state (token tables hold the real values) is off limits
+	// to every sandboxed process, however a command spells the path.
+	for _, d := range ownDirs {
+		if d != "" {
+			denyRead = append(denyRead, d)
+			deny = append(deny, "Read(/"+d+"/**)", "Edit(/"+d+"/**)")
+		}
+	}
 	for _, g := range ws.Protect {
 		g = strings.TrimPrefix(strings.TrimSpace(g), "./")
 		if g == "" {
@@ -294,12 +302,12 @@ func WorkspaceSettings(ws config.Workspace) map[string]any {
 
 // MergeWorkspaceSettings merges WorkspaceSettings into an existing
 // settings.local.json, keeping unrelated keys and de-duplicating lists.
-func MergeWorkspaceSettings(path string, ws config.Workspace) error {
+func MergeWorkspaceSettings(path string, ws config.Workspace, ownDirs ...string) error {
 	m, err := Read(path)
 	if err != nil {
 		return err
 	}
-	merge(m, WorkspaceSettings(ws))
+	merge(m, WorkspaceSettings(ws, ownDirs...))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
