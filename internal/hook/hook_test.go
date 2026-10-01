@@ -456,3 +456,17 @@ func TestDisplayShowsRealValuesOnScreenOnly(t *testing.T) {
 		t.Fatalf("display rewrite while disabled: %v", out)
 	}
 }
+
+func TestMaskedProtectedFolderIsStillProtected(t *testing.T) {
+	f := newFixture(t)
+	// A protected folder named after a client listed in terms.
+	b, _ := json.Marshal(config.Workspace{Version: 1, Terms: map[string][]string{"CLIENT": {"Acme Holdings"}}, Protect: []string{"Acme Holdings/**"}})
+	os.WriteFile(filepath.Join(f.ws, config.WorkspaceFile), b, 0o600)
+	os.MkdirAll(filepath.Join(f.ws, "Acme Holdings"), 0o700)
+	f.run("post-tool", map[string]any{"cwd": f.ws, "tool_name": "Bash", "tool_input": map[string]any{"command": "ls"},
+		"tool_response": map[string]any{"stdout": "Acme Holdings\n", "stderr": "", "interrupted": false, "isImage": false}})
+	out := f.run("pre-tool", map[string]any{"cwd": f.ws, "tool_name": "Read", "tool_input": map[string]any{"file_path": filepath.Join(f.ws, "⟦CLIENT_001⟧", "contract.txt")}})
+	if hso(out)["permissionDecision"] != "deny" {
+		t.Fatalf("placeholder path into a protected folder not denied: %v", out)
+	}
+}

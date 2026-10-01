@@ -560,28 +560,35 @@ func (h *handler) decidePreTool() decision {
 		return deny(i18n.Tf("ClaudeShield：%s 格式有誤（%v），為了安全先停用工具。", "ClaudeShield: %s cannot be parsed (%v); tools are disabled to be safe.", config.WorkspaceFile, h.wsErr))
 	}
 
-	// Paths this call touches, for protection and binary checks.
+	// Local file tools: expand placeholders first, then judge the real paths,
+	// so a protected folder named after a client (and therefore masked) is
+	// still recognised.
 	if localTools[tool] {
-		for _, p := range toolPaths(h.in.ToolInput) {
+		input, d, ok := h.unmaskLocal()
+		if !ok {
+			return d
+		}
+		for _, p := range toolPaths(input) {
 			abs := p
 			if !filepath.IsAbs(abs) {
 				abs = filepath.Join(h.in.Cwd, abs)
 			}
-			if h.ownFile(abs) || (writeTools[tool] && filepath.Base(abs) == config.WorkspaceFile) {
+			if h.ownFile(abs) || (writeTools[tool] && filepath.Base(config.Canonical(abs)) == config.WorkspaceFile) {
 				return deny(selfProtectReason())
 			}
 			if ws, ok, _ := config.FindWorkspace(filepath.Dir(abs)); ok {
 				if ws.Protected(abs) {
 					return deny(i18n.Tf("ClaudeShield：%s 在受保護的範圍（%s），Claude 不能讀取或修改。需要用到的話，請使用者用 claudeshield mask 產生遮罩版放到別的資料夾。",
 						"ClaudeShield: %s is protected (%s); Claude may not read or change it. If it is needed, the user can create a masked copy elsewhere with `claudeshield mask`.",
-						abs, strings.Join(ws.Protect, ", ")))
+						p, strings.Join(ws.Protect, ", ")))
 				}
 				if tool == "Read" && binaryExt[strings.ToLower(filepath.Ext(abs))] && !ws.BinaryReads {
 					return deny(i18n.Tf("ClaudeShield：%s 是二進位檔（PDF、圖片或 Office 檔），內容沒辦法遮罩，所以不能讀。請使用者先轉成文字檔，例如 Word 檔用 `textutil -convert txt 檔名.docx`，PDF 用 `pdftotext 檔名.pdf`，再讀轉出來的 .txt。",
-						"ClaudeShield: %s is a binary file (PDF, image or Office document) whose content cannot be masked. Convert it to text first, e.g. `textutil -convert txt file.docx` or `pdftotext file.pdf`, and read the .txt instead.", abs))
+						"ClaudeShield: %s is a binary file (PDF, image or Office document) whose content cannot be masked. Convert it to text first, e.g. `textutil -convert txt file.docx` or `pdftotext file.pdf`, and read the .txt instead.", p))
 				}
 			}
 		}
+		return d
 	}
 
 	if shellTools[tool] {
@@ -591,8 +598,6 @@ func (h *handler) decidePreTool() decision {
 	}
 
 	switch {
-	case localTools[tool]:
-		return h.unmaskLocal()
 	case shellTools[tool]:
 		return h.shell()
 	case tool == "WebFetch":
@@ -631,24 +636,27 @@ func toolPaths(in map[string]any) []string {
 	return out
 }
 
-// unmaskLocal puts real values back into a local file tool's input.
-func (h *handler) unmaskLocal() decision {
+// unmaskLocal puts real values back into a local file tool's input. It
+// returns the input to judge (expanded or original), the decision to return
+// if the checks pass, and ok=false when the decision is already a refusal.
+func (h *handler) unmaskLocal() (map[string]any, decision, bool) {
 	if !tokenmap.JSONHasTokens(h.in.ToolInput) {
-		return decision{}
+		return h.in.ToolInput, decision{}, true
 	}
 	path, err := h.mapPath()
 	if err != nil {
-		return deny(vaultClosedReason())
+		return nil, deny(vaultClosedReason()), false
 	}
 	m, err := tokenmap.Load(path)
 	if err != nil {
-		return deny(i18n.Tf("ClaudeShield：讀不到代號對照表：%v", "ClaudeShield: cannot read the placeholder table: %v", err))
+		return nil, deny(i18n.Tf("ClaudeShield：讀不到代號對照表：%v", "ClaudeShield: cannot read the placeholder table: %v", err)), false
 	}
 	out, _, unknown := m.UnmaskJSON(h.in.ToolInput)
-	if len(unknown) > 0 && (h.in.ToolName == "Write" || h.in.ToolName == "Edit" || h.in.ToolName == "MultiEdit" || h.in.ToolName == "NotebookEdit") {
-		return deny(i18n.Tf("ClaudeShield：%s 不是已知的代號。請照抄工具結果裡出現過的代號，不要自己編新的。", "ClaudeShield: %s is not a known placeholder. Copy placeholders exactly as they appeared in tool results; do not make new ones.", strings.Join(dedupe(unknown), ", ")))
+	if len(unknown) > 0 && writeTools[h.in.ToolName] {
+		return nil, deny(i18n.Tf("ClaudeShield：%s 不是已知的代號。請照抄工具結果裡出現過的代號，不要自己編新的。", "ClaudeShield: %s is not a known placeholder. Copy placeholders exactly as they appeared in tool results; do not make new ones.", strings.Join(dedupe(unknown), ", "))), false
 	}
-	return decision{verdict: h.rewriteVerdict(), input: out.(map[string]any)}
+	input := out.(map[string]any)
+	return input, decision{verdict: h.rewriteVerdict(), input: input}, true
 }
 
 // rewriteVerdict is the permission decision sent with updatedInput. It is
