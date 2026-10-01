@@ -1,0 +1,6 @@
+/claudeshield
+/coverage.out
+/dist/
+*.test
+*.prof
+.DS_Store

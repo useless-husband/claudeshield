@@ -46,6 +46,7 @@ type Input struct {
 	ToolResponse   any            `json:"tool_response"`
 	ToolUseID      string         `json:"tool_use_id"`
 	Prompt         string         `json:"prompt"`
+	Delta          string         `json:"delta"`
 	Source         string         `json:"source"`
 	AgentID        string         `json:"agent_id"`
 }
@@ -130,6 +131,8 @@ func Run(event string, stdin io.Reader, stdout io.Writer, env Env) int {
 		err = h.preTool()
 	case "post-tool", "PostToolUse":
 		err = h.postTool()
+	case "display", "MessageDisplay":
+		err = h.display()
 	default:
 		err = fmt.Errorf("unknown hook event %q", event)
 	}
@@ -833,6 +836,30 @@ func redactAll(v any) any {
 		return cp
 	}
 	return v
+}
+
+// --- MessageDisplay ------------------------------------------------------------
+
+// display shows the user real values where Claude's reply has placeholders.
+// It changes only what is rendered on this screen; the transcript and what
+// Claude sees keep the placeholders. Any error simply shows the original.
+func (h *handler) display() error {
+	if !h.env.Global.ShowRealValues() || !strings.Contains(h.in.Delta, "⟦") {
+		return nil
+	}
+	path, err := h.mapPath()
+	if err != nil {
+		return nil
+	}
+	m, err := tokenmap.Load(path)
+	if err != nil {
+		return nil
+	}
+	out, n, _ := m.Unmask(h.in.Delta)
+	if n == 0 {
+		return nil
+	}
+	return writeJSON(h.out, map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "MessageDisplay", "displayContent": out}})
 }
 
 // --- helpers -----------------------------------------------------------------

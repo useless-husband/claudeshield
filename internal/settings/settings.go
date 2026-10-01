@@ -32,6 +32,7 @@ var Events = []struct {
 	{"UserPromptSubmit", "prompt", "", 25},
 	{"PreToolUse", "pre-tool", "*", 20},
 	{"PostToolUse", "post-tool", "*", 20},
+	{"MessageDisplay", "display", "", 5},
 }
 
 // PrivacyEnv are the variables install adds to settings.json's env block:

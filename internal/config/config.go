@@ -81,8 +81,11 @@ type Global struct {
 	Lang string `json:"lang,omitempty"`
 	// GlobalMasking runs the Basic detector in every session. Pointer so that
 	// "absent" means the default (on) and an explicit false sticks.
-	GlobalMasking *bool    `json:"global_masking,omitempty"`
-	AllowHosts    []string `json:"allow_hosts,omitempty"`
+	GlobalMasking *bool `json:"global_masking,omitempty"`
+	// ShowRealValues restores placeholders in Claude's replies on screen
+	// (MessageDisplay). Absent means on.
+	ShowRealValuesOpt *bool    `json:"show_real_values,omitempty"`
+	AllowHosts        []string `json:"allow_hosts,omitempty"`
 	// Allow lists values never masked in ordinary sessions (same syntax as
 	// the workspace allow list).
 	Allow []string `json:"allow,omitempty"`
@@ -122,6 +125,9 @@ type InstallRecord struct {
 	Backup     string    `json:"backup"`
 	AddedEnv   []string  `json:"added_env,omitempty"`
 }
+
+// ShowRealValues reports whether replies are displayed with real values.
+func (g Global) ShowRealValues() bool { return g.ShowRealValuesOpt == nil || *g.ShowRealValuesOpt }
 
 // MaskingOn reports whether the Basic detector runs in every session.
 func (g Global) MaskingOn() bool { return g.GlobalMasking == nil || *g.GlobalMasking }

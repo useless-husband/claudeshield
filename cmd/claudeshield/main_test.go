@@ -102,7 +102,7 @@ func TestInstallUninstall(t *testing.T) {
 	var s map[string]any
 	json.Unmarshal(b, &s)
 	hooks := s["hooks"].(map[string]any)
-	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"} {
+	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "MessageDisplay"} {
 		if hooks[ev] == nil {
 			t.Fatalf("missing %s hook", ev)
 		}

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      # Real AES-256 sparse bundles: create, wrong password, migrate, closed-vault writes.
+      - name: vault tests with hdiutil
+        if: matrix.os == 'macos-latest'
+        run: make vault-test
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go test -run '^$' -fuzz FuzzFind -fuzztime 20s ./internal/detect/
+      - run: go test -run '^$' -fuzz FuzzRoundTrip -fuzztime 20s ./internal/tokenmap/
+      - run: go test -run '^$' -fuzz FuzzAnalyzeShell -fuzztime 20s ./internal/egress/
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+      - name: go mod tidy
+        run: go mod tidy && git diff --exit-code go.mod
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: |
+          for os in darwin linux; do for arch in arm64 amd64; do
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -o /dev/null ./cmd/claudeshield
+          done; done

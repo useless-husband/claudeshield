@@ -11,7 +11,6 @@ import "sort"
 // slice rather than a 256-entry table.
 type ahoCorasick struct {
 	nodes []acNode
-	pats  []int // pattern index → caller's term index
 }
 
 type acNode struct {

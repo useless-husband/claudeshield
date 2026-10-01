@@ -434,3 +434,18 @@ func TestSymlinkIntoProtectedFolderIsDenied(t *testing.T) {
 		t.Fatalf("symlink into raw/ not denied: %v", out)
 	}
 }
+
+func TestDisplayShowsRealValuesOnScreenOnly(t *testing.T) {
+	f := newFixture(t)
+	f.run("post-tool", map[string]any{"cwd": f.ws, "tool_name": "Read", "tool_input": map[string]any{"file_path": filepath.Join(f.ws, "a.txt")},
+		"tool_response": readResp("電話 0912-345-678")})
+	out := f.run("display", map[string]any{"cwd": f.ws, "delta": "Call ⟦PHONE_001⟧ tomorrow.\n", "index": 0, "final": true})
+	if got := hso(out)["displayContent"]; got != "Call 0912-345-678 tomorrow.\n" {
+		t.Fatalf("got %v", out)
+	}
+	off := false
+	f.env.Global.ShowRealValuesOpt = &off
+	if out := f.run("display", map[string]any{"cwd": f.ws, "delta": "Call ⟦PHONE_001⟧.\n"}); out != nil {
+		t.Fatalf("display rewrite while disabled: %v", out)
+	}
+}
