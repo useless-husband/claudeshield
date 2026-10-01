@@ -120,6 +120,7 @@ type InstallRecord struct {
 	Executable string    `json:"executable"`
 	Settings   string    `json:"settings"`
 	Backup     string    `json:"backup"`
+	AddedEnv   []string  `json:"added_env,omitempty"`
 }
 
 // MaskingOn reports whether the Basic detector runs in every session.
@@ -327,4 +328,37 @@ func matchSegs(p, s []string) bool {
 		p, s = p[1:], s[1:]
 	}
 	return len(s) == 0
+}
+
+// SandboxStrict reports whether the workspace's Claude Code settings turn the
+// sandbox on with no unsandboxed escape hatch and with sandboxed commands
+// auto-allowed. Local settings override project settings, as in Claude Code.
+func (w Workspace) SandboxStrict() bool {
+	enabled, noEscape, autoAllow := false, false, true
+	for _, name := range []string{"settings.json", "settings.local.json"} {
+		b, err := os.ReadFile(filepath.Join(w.Root, ".claude", name))
+		if err != nil {
+			continue
+		}
+		var s struct {
+			Sandbox *struct {
+				Enabled                  *bool `json:"enabled"`
+				AllowUnsandboxedCommands *bool `json:"allowUnsandboxedCommands"`
+				AutoAllowBashIfSandboxed *bool `json:"autoAllowBashIfSandboxed"`
+			} `json:"sandbox"`
+		}
+		if json.Unmarshal(b, &s) != nil || s.Sandbox == nil {
+			continue
+		}
+		if s.Sandbox.Enabled != nil {
+			enabled = *s.Sandbox.Enabled
+		}
+		if s.Sandbox.AllowUnsandboxedCommands != nil {
+			noEscape = !*s.Sandbox.AllowUnsandboxedCommands
+		}
+		if s.Sandbox.AutoAllowBashIfSandboxed != nil {
+			autoAllow = *s.Sandbox.AutoAllowBashIfSandboxed
+		}
+	}
+	return enabled && noEscape && autoAllow
 }

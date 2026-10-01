@@ -62,6 +62,9 @@ type Env struct {
 	PreflightTTL time.Duration
 	// GitRemoteURL resolves remote names in git commands (tests override it).
 	GitRemoteURL func(dir, remote string) (string, bool)
+	// ConfigErr is set when ~/.claudeshield/config.json could not be read;
+	// every hook then fails (closed inside a workspace).
+	ConfigErr error
 }
 
 func (e *Env) defaults() {
@@ -85,15 +88,17 @@ const Marker = "# claudeshield: mask output even if the command fails"
 
 // wrapShell makes a failing command exit 0 and append its real status.
 // Claude Code routes a failed command's output to PostToolUseFailure, which
-// cannot rewrite what Claude sees; a successful one goes through PostToolUse,
-// which can. The EXIT trap also catches an explicit "exit N" in the command.
+// can neither rewrite what Claude sees nor stop the turn (verified on
+// v2.1.287: "continue": false is ignored there); a successful one goes through
+// PostToolUse, which can. The command runs in a { } group in the same shell,
+// so cd and variables behave as before. (An EXIT trap would also catch
+// "exit N", but Claude Code's Bash tool rejects commands containing trap.) A
+// command that itself calls exit still ends the shell early; see Limitations.
 func wrapShell(cmd string) string {
 	if strings.HasPrefix(cmd, Marker) {
 		return cmd
 	}
-	return Marker + "\n" +
-		`trap '__cs_rc=$?; trap - EXIT; if [ "$__cs_rc" -ne 0 ]; then printf "\n[exit status %s]\n" "$__cs_rc"; fi; exit 0' EXIT` + "\n" +
-		cmd
+	return Marker + "\n{ " + cmd + "\n}; __cs_rc=$?; if [ \"$__cs_rc\" -ne 0 ]; then printf '\\n[exit status %s]\\n' \"$__cs_rc\"; fi; true"
 }
 
 // Run handles one hook event. It returns the process exit code.
@@ -111,6 +116,9 @@ func Run(event string, stdin io.Reader, stdout io.Writer, env Env) int {
 	}
 	if in.Cwd == "" {
 		in.Cwd = env.Getenv("CLAUDE_PROJECT_DIR")
+	}
+	if env.ConfigErr != nil {
+		return failure(stdout, event, env, in.Cwd, fmt.Errorf("config: %w", env.ConfigErr))
 	}
 	h := &handler{env: env, in: in, out: stdout}
 	switch event {
@@ -180,25 +188,21 @@ func (h *handler) context() {
 	}
 }
 
-// mapPath picks the token table: per workspace, inside the vault when one is
-// configured. A configured but closed vault is an error, never a silent
-// fallback to an unencrypted file.
+// mapPath picks the token table for this session.
 func (h *handler) mapPath() (string, error) {
 	h.context()
-	id := "global"
-	if h.inWS && h.wsErr == nil {
-		id = h.ws.ID()
+	ws := h.ws
+	if h.wsErr != nil {
+		ws = config.Workspace{} // unreadable marker: no stable ID, use the global table
 	}
-	if vault.Configured(h.env.Global) {
-		if !vault.Mounted(h.env.Paths, h.env.Global) {
-			return "", errVaultClosed
-		}
-		return filepath.Join(vault.DataDir(h.env.Paths, h.env.Global), "maps", id+".json"), nil
+	p, err := vault.MapPath(h.env.Paths, h.env.Global, ws, h.inWS && h.wsErr == nil)
+	if errors.Is(err, vault.ErrClosed) {
+		return "", errVaultClosed
 	}
-	return filepath.Join(h.env.Paths.State, "maps", id+".json"), nil
+	return p, err
 }
 
-var errVaultClosed = errors.New("vault closed")
+var errVaultClosed = vault.ErrClosed
 
 // detectorConfig returns the detection settings for content at path (or the
 // session's working directory when path is empty); ok is false when nothing
@@ -359,7 +363,7 @@ func (h *handler) userPrompt() error {
 			return h.blockPrompt(i18n.Tf(
 				"ClaudeShield：訊息裡用 @ 引用了檔案（%s）。用 @ 引用時，Claude Code 會把檔案原文直接放進訊息，不會經過遮罩。請改成用文字說「請讀 %s」，讓 Claude 用讀檔工具讀，內容就會先遮罩。",
 				"ClaudeShield: the prompt references files with @ (%s). Claude Code inlines @-referenced files verbatim, bypassing masking. Ask in words instead (\"read %s\") so the file goes through the Read tool and gets masked.",
-				strings.Join(refs, ", "), refs[0]))
+				strings.Join(refs, ", "), strings.TrimPrefix(refs[0], "@")))
 		}
 	}
 	d := h.detectorFor("")
@@ -707,21 +711,27 @@ func (h *handler) shell() decision {
 	if h.inWS && r.Network && !r.AllHostsAllowed(allow) {
 		return ask(i18n.Tf("ClaudeShield：這個指令會連到白名單以外的地方：%s。", "ClaudeShield: this command connects to a destination not on the allowlist: %s.", where))
 	}
-	if hasTokens || h.inWS {
-		in := cloneMap(h.in.ToolInput)
-		in["command"] = real
-		if h.inWS && h.in.ToolName == "Bash" {
-			in["command"] = wrapShell(real)
-		}
-		v := ""
-		if hasTokens && h.inWS && r.Network {
-			v = "ask" // real values about to reach an allowlisted host: show the user
-		} else {
-			v = h.rewriteVerdict()
-		}
-		return decision{verdict: v, input: in, reason: i18n.T("ClaudeShield：已把代號換回真實內容（只在本機執行）。", "ClaudeShield: placeholders were replaced with real values for local execution.")}
+	wrap := h.inWS && h.in.ToolName == "Bash" && h.ws.SandboxStrict()
+	if !hasTokens && !wrap {
+		return decision{}
 	}
-	return decision{}
+	in := cloneMap(h.in.ToolInput)
+	in["command"] = real
+	v := h.rewriteVerdict()
+	if wrap {
+		in["command"] = wrapShell(real)
+		// The wrapped command uses $? and a { } group, which Claude Code's
+		// permission parser cannot trace, so without a decision it would ask
+		// every time. Inside a workspace whose sandbox is strict, sandboxed
+		// commands are auto-allowed anyway (autoAllowBashIfSandboxed), so
+		// "allow" grants nothing new: deny and ask rules still apply and the
+		// OS sandbox still confines the command.
+		v = "allow"
+	}
+	if hasTokens && h.inWS && r.Network {
+		v = "ask" // real values about to reach an allowlisted host: show the user
+	}
+	return decision{verdict: v, input: in, reason: i18n.T("ClaudeShield：已把代號換回真實內容（只在本機執行）。", "ClaudeShield: placeholders were replaced with real values for local execution.")}
 }
 
 func (h *handler) webFetch() decision {

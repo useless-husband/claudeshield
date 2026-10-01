@@ -99,7 +99,7 @@ func (o *Options) defaults() {
 		}
 	}
 	if o.TLSChain == nil {
-		o.TLSChain = fetchChain
+		o.TLSChain = FetchChain
 	}
 }
 
@@ -110,10 +110,10 @@ func runCmd(name string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// fetchChain completes a TLS handshake and returns the server's chain
+// FetchChain completes a TLS handshake and returns the server's chain
 // unverified; verification against claudeshield's own root set happens in
 // checkTLS, deliberately without the system trust store.
-func fetchChain(host string) ([]*x509.Certificate, net.IP, error) {
+func FetchChain(host string) ([]*x509.Certificate, net.IP, error) {
 	d := &net.Dialer{Timeout: 5 * time.Second}
 	conn, err := tls.DialWithDialer(d, "tcp", net.JoinHostPort(host, "443"), &tls.Config{
 		ServerName:         host,
@@ -145,6 +145,13 @@ func Run(o Options) Report {
 				Fix:    i18n.T("修正那個 JSON 檔（可以刪掉後重新執行 claudeshield init）。", "Fix the JSON file (or delete it and run `claudeshield init` again)."),
 			})
 		}
+	}
+	if inWS && wsErr == nil && !ws.SandboxStrict() {
+		r.Findings = append(r.Findings, Finding{ID: "workspace.sandbox", Severity: Block, Fingerprint: Fingerprint(ws.Root),
+			Title:  i18n.T("敏感資料夾的沙盒沒有開好", "The sensitive workspace's sandbox is not set up"),
+			Detail: i18n.T("沒有沙盒時，指令執行失敗的輸出不會經過遮罩，網路也只靠 hook 判斷。", "Without the sandbox, the output of failing commands is not masked and network access rests on the hook alone."),
+			Fix:    i18n.T("在這個資料夾執行 claudeshield init（會寫入 .claude/settings.local.json）", "Run `claudeshield init` in this folder (it writes .claude/settings.local.json)"),
+		})
 	}
 	r.Findings = append(r.Findings, checkEnv(o)...)
 	r.Findings = append(r.Findings, checkSettings(o)...)

@@ -3,6 +3,7 @@
 package vault
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -50,4 +51,24 @@ func DataDir(p config.Paths, g config.Global) string {
 func exists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
+}
+
+// ErrClosed means a vault is configured but not attached.
+var ErrClosed = errors.New("vault closed")
+
+// MapPath is the token table for a workspace (or the "global" table when
+// inWS is false). With a vault configured it lives inside the vault, and a
+// closed vault is an error: never a silent fallback to an unencrypted file.
+func MapPath(p config.Paths, g config.Global, ws config.Workspace, inWS bool) (string, error) {
+	id := "global"
+	if inWS && ws.Root != "" {
+		id = ws.ID()
+	}
+	if Configured(g) {
+		if !Mounted(p, g) {
+			return "", ErrClosed
+		}
+		return filepath.Join(DataDir(p, g), "maps", id+".json"), nil
+	}
+	return filepath.Join(p.State, "maps", id+".json"), nil
 }

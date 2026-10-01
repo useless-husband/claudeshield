@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,6 +43,8 @@ func newFixture(t *testing.T) *fixture {
 	ws.Terms = map[string][]string{"CLIENT": {"Acme Holdings"}}
 	b, _ := json.Marshal(ws)
 	os.WriteFile(filepath.Join(f.ws, config.WorkspaceFile), b, 0o600)
+	os.MkdirAll(filepath.Join(f.ws, ".claude"), 0o700)
+	os.WriteFile(filepath.Join(f.ws, ".claude", "settings.local.json"), []byte(`{"sandbox":{"enabled":true,"allowUnsandboxedCommands":false}}`), 0o600)
 	f.open = filepath.Join(home, "hobby")
 	os.MkdirAll(f.open, 0o755)
 	return f
@@ -142,11 +145,20 @@ func TestShellInWorkspaceIsWrappedAndUnmasked(t *testing.T) {
 	out := f.run("pre-tool", map[string]any{"cwd": f.ws, "tool_name": "Bash",
 		"tool_input": map[string]any{"command": "grep -c ⟦EMAIL_001⟧ *.txt", "description": "count"}})
 	cmd := hso(out)["updatedInput"].(map[string]any)["command"].(string)
-	if !strings.HasPrefix(cmd, Marker+"\n") || !strings.HasSuffix(cmd, "grep -c wang@corp.com.tw *.txt") {
+	if !strings.HasPrefix(cmd, Marker+"\n{ grep -c wang@corp.com.tw *.txt\n}; ") {
 		t.Fatalf("got %q", cmd)
+	}
+	if hso(out)["permissionDecision"] != "allow" {
+		t.Fatalf("wrapped command in a strict sandbox should be allowed: %v", hso(out)["permissionDecision"])
 	}
 	if hso(out)["updatedInput"].(map[string]any)["description"] != "count" {
 		t.Fatal("other fields dropped")
+	}
+	// Without the workspace sandbox there is no wrapping and no allow.
+	os.Remove(filepath.Join(f.ws, ".claude", "settings.local.json"))
+	out = f.run("pre-tool", map[string]any{"cwd": f.ws, "tool_name": "Bash", "tool_input": map[string]any{"command": "ls"}})
+	if out != nil {
+		t.Fatalf("expected no rewrite without sandbox, got %v", out)
 	}
 }
 
@@ -366,8 +378,33 @@ func TestMalformedInputFailsClosed(t *testing.T) {
 
 func TestWrapShellIsIdempotent(t *testing.T) {
 	w := wrapShell("ls")
-	if wrapShell(w) != w || !strings.HasSuffix(w, "\nls") {
+	if wrapShell(w) != w || !strings.Contains(w, "{ ls\n}") {
 		t.Fatalf("got %q", w)
+	}
+}
+
+// The wrapper must keep stdout, turn a failure into success with the status
+// appended, and keep cd effective within the command, in both bash and zsh.
+func TestWrapShellBehaviour(t *testing.T) {
+	for _, sh := range []string{"bash", "zsh"} {
+		if _, err := exec.LookPath(sh); err != nil {
+			continue
+		}
+		for cmd, want := range map[string]string{
+			"echo hi":                              "hi\n",
+			"echo out; false":                      "out\n\n[exit status 1]\n",
+			"cd / && pwd":                          "/\n",
+			"cat <<'EOF'\nline\nEOF":               "line\n",
+			"python3 -c 'import sys; sys.exit(3)'": "\n[exit status 3]\n",
+		} {
+			out, err := exec.Command(sh, "-c", wrapShell(cmd)).Output()
+			if err != nil {
+				t.Errorf("%s: %q exited non-zero: %v", sh, cmd, err)
+			}
+			if string(out) != want {
+				t.Errorf("%s: %q -> %q, want %q", sh, cmd, out, want)
+			}
+		}
 	}
 }
 
