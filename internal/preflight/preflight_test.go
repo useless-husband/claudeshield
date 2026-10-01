@@ -133,7 +133,9 @@ func ids(r Report, sev Severity) []string {
 func TestCleanMachinePasses(t *testing.T) {
 	o := baseOptions(t)
 	o.Network = true
-	o.TLSChain = func(string) ([]*x509.Certificate, net.IP, error) { return realChain(t), net.ParseIP("160.79.104.10"), nil }
+	o.TLSChain = func(string) ([]*x509.Certificate, net.IP, error) {
+		return realChain(t), net.ParseIP("160.79.104.10"), nil
+	}
 	r := Run(o)
 	if r.Blocked() {
 		t.Fatalf("blocked: %v", ids(r, Block))
