@@ -74,6 +74,44 @@ type rule struct {
 	valid func(string) bool // optional extra check on the value
 	basic bool              // part of the Basic profile
 	prio  int               // tie-breaker when two rules claim the same span
+	// need lists lower-cased literals of which at least one must occur in a
+	// line before the regex runs on it; digits is a minimum run of ASCII
+	// digits. Both are cheap prefilters: regexp matching dominates the cost,
+	// and most lines cannot match most rules.
+	need   []string
+	digits int
+	// multiline rules run once over the whole text instead of per line.
+	multiline bool
+}
+
+func (r *rule) worth(lower string) bool {
+	if r.digits > 0 && !hasDigitRun(lower, r.digits) {
+		return false
+	}
+	if len(r.need) == 0 {
+		return true
+	}
+	for _, n := range r.need {
+		if strings.Contains(lower, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDigitRun(s string, n int) bool {
+	run := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			run++
+			if run >= n {
+				return true
+			}
+		} else if s[i] != '-' && s[i] != ' ' && s[i] != ',' && s[i] != '.' {
+			run = 0
+		}
+	}
+	return false
 }
 
 // TokenRE matches a placeholder produced by the tokenmap package. Detection
@@ -84,85 +122,85 @@ var twCounties = `(?:臺北市|台北市|新北市|桃園市|臺中市|台中市
 
 var rules = []rule{
 	// --- credentials -------------------------------------------------------
-	{kind: "PRIVKEY", cat: Secret, basic: true, prio: 100,
+	{kind: "PRIVKEY", multiline: true, need: []string{"private key"}, cat: Secret, basic: true, prio: 100,
 		re: regexp.MustCompile(`-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----`)},
-	{kind: "APIKEY", cat: Secret, basic: true, prio: 90,
+	{kind: "APIKEY", need: []string{"sk-ant-"}, cat: Secret, basic: true, prio: 90,
 		re: regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_\-]{20,}`)},
-	{kind: "APIKEY", cat: Secret, basic: true, prio: 80,
+	{kind: "APIKEY", need: []string{"sk-"}, cat: Secret, basic: true, prio: 80,
 		re: regexp.MustCompile(`\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{20,}`)},
-	{kind: "APIKEY", cat: Secret, basic: true, prio: 80,
+	{kind: "APIKEY", need: []string{"akia", "asia"}, cat: Secret, basic: true, prio: 80,
 		re: regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)},
-	{kind: "SECRET", cat: Secret, basic: true, prio: 80,
+	{kind: "SECRET", need: []string{"secret"}, cat: Secret, basic: true, prio: 80,
 		re:    regexp.MustCompile(`(?i)aws_?secret_?access_?key["']?\s*[:=]\s*["']?([A-Za-z0-9/+=]{40})`),
 		group: 1},
-	{kind: "APIKEY", cat: Secret, basic: true, prio: 80,
+	{kind: "APIKEY", need: []string{"gh", "github_pat_"}, cat: Secret, basic: true, prio: 80,
 		re: regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})\b`)},
-	{kind: "APIKEY", cat: Secret, basic: true, prio: 80,
+	{kind: "APIKEY", need: []string{"xox"}, cat: Secret, basic: true, prio: 80,
 		re: regexp.MustCompile(`\bxox[abposr]-[A-Za-z0-9-]{10,}`)},
-	{kind: "APIKEY", cat: Secret, basic: true, prio: 80,
+	{kind: "APIKEY", need: []string{"_live_", "_test_"}, cat: Secret, basic: true, prio: 80,
 		re: regexp.MustCompile(`\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b`)},
-	{kind: "APIKEY", cat: Secret, basic: true, prio: 80,
+	{kind: "APIKEY", need: []string{"aiza"}, cat: Secret, basic: true, prio: 80,
 		re: regexp.MustCompile(`\bAIza[0-9A-Za-z_\-]{35}\b`)},
-	{kind: "APIKEY", cat: Secret, basic: true, prio: 80,
+	{kind: "APIKEY", need: []string{"glpat-"}, cat: Secret, basic: true, prio: 80,
 		re: regexp.MustCompile(`\bglpat-[A-Za-z0-9_\-]{20,}\b`)},
-	{kind: "JWT", cat: Secret, basic: true, prio: 70,
+	{kind: "JWT", need: []string{"eyj"}, cat: Secret, basic: true, prio: 70,
 		re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`)},
-	{kind: "SECRET", cat: Secret, basic: true, prio: 60, group: 1, valid: plausibleSecret,
+	{kind: "SECRET", need: []string{"bearer"}, cat: Secret, basic: true, prio: 60, group: 1, valid: plausibleSecret,
 		re: regexp.MustCompile(`(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{20,})`)},
-	{kind: "PASSWORD", cat: Secret, basic: true, prio: 60, group: 1, valid: plausibleSecret,
+	{kind: "PASSWORD", need: []string{"://"}, cat: Secret, basic: true, prio: 60, group: 1, valid: plausibleSecret,
 		re: regexp.MustCompile(`\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@'"]+:([^\s@/'"]+)@[^\s/'"]+`)},
-	{kind: "PASSWORD", cat: Secret, basic: true, prio: 50, group: 1, valid: plausibleSecret,
+	{kind: "PASSWORD", need: []string{"pass", "pwd", "secret", "token", "key", "credential"}, cat: Secret, basic: true, prio: 50, group: 1, valid: plausibleSecret,
 		re: regexp.MustCompile(`(?i)(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token|credentials?)["']?\s*[:=]\s*["']([^"'\s]{6,})["']`)},
-	{kind: "PASSWORD", cat: Secret, basic: true, prio: 50, group: 1, valid: plausibleSecret,
+	{kind: "PASSWORD", need: []string{"pass", "secret", "token", "key"}, cat: Secret, basic: true, prio: 50, group: 1, valid: plausibleSecret,
 		// .env style: an upper-case variable name directly followed by "=".
 		// Spaces around "=" mean source code ("password = request.form[...]"),
 		// which the quoted-value rule above already covers.
 		re: regexp.MustCompile(`(?m)^[ \t]*(?:export[ \t]+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY)[A-Z0-9_]*=["']?([^\s"'#]{6,})`)},
-	{kind: "IP", cat: Secret, prio: 30, valid: validIPv4,
+	{kind: "IP", need: []string{"10.", "192.168.", "172."}, cat: Secret, prio: 30, valid: validIPv4,
 		re: regexp.MustCompile(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b`)},
-	{kind: "HOST", cat: Secret, prio: 30,
+	{kind: "HOST", need: []string{".internal", ".corp", ".intranet", ".lan", ".local", ".private"}, cat: Secret, prio: 30,
 		re: regexp.MustCompile(`(?i)\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.(?:internal|corp|intranet|lan|local|private|localdomain)\b`)},
 
 	// --- people ------------------------------------------------------------
-	{kind: "TWID", cat: PII, prio: 70, valid: ValidTaiwanID,
+	{kind: "TWID", digits: 8, cat: PII, prio: 70, valid: ValidTaiwanID,
 		re: regexp.MustCompile(`\b[A-Z][1289A-D][0-9]{8}\b`)},
-	{kind: "EMAIL", cat: PII, prio: 60,
+	{kind: "EMAIL", need: []string{"@"}, cat: PII, prio: 60,
 		re: regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}\b`)},
-	{kind: "PHONE", cat: PII, prio: 55,
+	{kind: "PHONE", need: []string{"09", "886"}, digits: 4, cat: PII, prio: 55,
 		re: regexp.MustCompile(`(?:\+886[\s-]?|\b0)9\d{2}[\s-]?\d{3}[\s-]?\d{3}\b`)},
-	{kind: "PHONE", cat: PII, prio: 50,
+	{kind: "PHONE", need: []string{"0"}, digits: 4, cat: PII, prio: 50,
 		re: regexp.MustCompile(`\(0[2-8]\d?\)\s?\d{3,4}[\s-]?\d{4}\b|\b0[2-8]\d?[\s-]\d{3,4}[\s-]?\d{4}\b|\+886[\s-]?[2-8]\d?[\s-]?\d{3,4}[\s-]?\d{4}\b`)},
-	{kind: "PHONE", cat: PII, prio: 40,
+	{kind: "PHONE", need: []string{"+"}, digits: 3, cat: PII, prio: 40,
 		re: regexp.MustCompile(`\+[1-9]\d{0,2}[\s-]?\(?\d{1,4}\)?(?:[\s-]?\d{2,4}){2,4}\b`)},
-	{kind: "CARD", cat: PII, prio: 65, valid: validCard,
+	{kind: "CARD", digits: 13, cat: PII, prio: 65, valid: validCard,
 		re: regexp.MustCompile(`\b[3-6]\d{3}(?:[ -]?\d){9,15}\b`)},
-	{kind: "ADDRESS", cat: PII, prio: 45,
+	{kind: "ADDRESS", need: []string{"號"}, cat: PII, prio: 45,
 		re: regexp.MustCompile(twCounties + `?(?:[\p{Han}]{1,3}[區鄉鎮市])?[\p{Han}0-9]{1,5}(?:路|街|大道)(?:[一二三四五六七八九十0-9]+段)?(?:[0-9]+巷)?(?:[0-9]+弄)?[0-9]+(?:之[0-9]+)?號(?:[0-9]+樓)?(?:之[0-9]+)?`)},
-	{kind: "NAME", cat: PII, prio: 40, group: 1,
+	{kind: "NAME", need: []string{"姓名", "客戶", "客户", "聯絡人", "联系人", "負責人", "收件人", "申請人", "承辦人", "員工", "病患", "學生", "學員"}, cat: PII, prio: 40, group: 1,
 		re: regexp.MustCompile(`(?:姓名|客戶|客户|聯絡人|联系人|負責人|收件人|申請人|承辦人|員工|病患|學生|學員)\s*[：:]\s*([\p{Han}]{2,4})`)},
-	{kind: "NAME", cat: PII, prio: 40, group: 1,
+	{kind: "NAME", need: []string{"出席", "列席", "與會", "參加者", "參與者", "成員", "收件者", "寄件者", "致", "敬啟者"}, cat: PII, prio: 40, group: 1,
 		re: regexp.MustCompile(`(?:出席|列席|與會|參加者|參與者|成員|收件者|寄件者|致|敬啟者)\s*[：:]\s*([\p{Han}]{2,4})`)},
-	{kind: "NAME", cat: PII, prio: 40, group: 1,
+	{kind: "NAME", need: []string{"name", "customer", "client", "contact"}, cat: PII, prio: 40, group: 1,
 		re: regexp.MustCompile(`\b(?:[Nn]ame|NAME|[Cc]ustomer|[Cc]lient|[Cc]ontact)\s*[:=]\s*["']?([A-Z][a-z]+(?:[ \t][A-Z][a-z]+){1,2})`)},
 
 	// --- money -------------------------------------------------------------
-	{kind: "AMOUNT", cat: Finance, prio: 35,
+	{kind: "AMOUNT", need: []string{"nt", "usd", "twd", "us$", "hk$", "rmb", "cny", "jpy", "eur", "€", "£", "¥", "＄"}, cat: Finance, prio: 35,
 		re: regexp.MustCompile(`(?:NT\$|NTD|TWD|US\$|USD|HK\$|RMB|CNY|JPY|EUR|€|£|¥|＄)\s?\d+(?:,\d{3})*(?:\.\d+)?(?:\s?(?:萬|億|千|百萬|[kKmM]\b|million\b|billion\b))?`)},
-	{kind: "AMOUNT", cat: Finance, prio: 35,
+	{kind: "AMOUNT", need: []string{"$"}, cat: Finance, prio: 35,
 		re: regexp.MustCompile(`\$\s?(?:\d{1,3}(?:,\d{3})+|\d{3,})(?:\.\d+)?(?:\s?(?:[kKmM]\b|million\b|billion\b))?`)},
-	{kind: "AMOUNT", cat: Finance, prio: 35,
+	{kind: "AMOUNT", need: []string{"元", "圓", "萬", "億", "美金", "台幣"}, cat: Finance, prio: 35,
 		re: regexp.MustCompile(`\d+(?:,\d{3})*(?:\.\d+)?\s?(?:萬元|億元|千元|百萬元|元|圓|萬|億|美元|美金|台幣|新台幣|日圓|人民幣|歐元)`)},
-	{kind: "AMOUNT", cat: Finance, prio: 35, group: 1,
+	{kind: "AMOUNT", need: []string{"報價", "營收", "營業額", "金額", "薪", "預算", "成本", "價", "總額", "獲利", "淨利", "毛利", "price", "salary", "revenue", "amount", "budget", "cost"}, cat: Finance, prio: 35, group: 1,
 		re: regexp.MustCompile(`(?i)(?:報價|營收|營業額|金額|薪資|薪水|月薪|年薪|時薪|預算|成本|售價|單價|總價|總額|獲利|淨利|毛利|price|salary|revenue|amount|budget|cost)\s*[：:=]\s*([\d,]*\d(?:\.\d+)?)`)},
-	{kind: "BANKACCT", cat: Finance, prio: 45, group: 1,
+	{kind: "BANKACCT", need: []string{"帳", "account"}, cat: Finance, prio: 45, group: 1,
 		re: regexp.MustCompile(`(?i)(?:銀行帳號|帳號|帳戶|account\s*(?:no\.?|number|#))\s*[：:]?\s*(\d[\d-]{8,18}\d)`)},
 
 	// --- organisations -----------------------------------------------------
-	{kind: "COMPANY", cat: Doc, prio: 40,
+	{kind: "COMPANY", need: []string{"公司"}, cat: Doc, prio: 40,
 		re: regexp.MustCompile(`[\p{Han}A-Za-z0-9]{2,10}(?:股份有限公司|有限公司)`)},
-	{kind: "COMPANY", cat: Doc, prio: 40,
+	{kind: "COMPANY", need: []string{"inc", "corp", "ltd", "llc", "gmbh", "co."}, cat: Doc, prio: 40,
 		re: regexp.MustCompile(`\b(?:[A-Z][A-Za-z0-9&-]+[ \t]){0,3}[A-Z][A-Za-z0-9&-]+,?[ \t](?:Inc|Corp|Corporation|Ltd|LLC|GmbH|Co\.,?[ \t]Ltd)\b\.?`)},
-	{kind: "UBN", cat: Doc, prio: 45, group: 1, valid: ValidUBN,
+	{kind: "UBN", need: []string{"統一編號", "統編", "ubn", "vat"}, cat: Doc, prio: 45, group: 1, valid: ValidUBN,
 		re: regexp.MustCompile(`(?:統一編號|統編|UBN|VAT\s*No\.?)\s*[：:]?\s*(\d{8})\b`)},
 }
 
@@ -171,6 +209,8 @@ type Detector struct {
 	cfg      Config
 	rules    []rule
 	terms    []term
+	termAC   *ahoCorasick
+	termLens []int
 	allowSet map[string]bool
 	allowSfx []string
 	extHost  *regexp.Regexp
@@ -223,6 +263,18 @@ func New(cfg Config) *Detector {
 	}
 	// Longest first, so "Acme Holdings" wins over "Acme".
 	sort.SliceStable(d.terms, func(i, j int) bool { return len(d.terms[i].value) > len(d.terms[j].value) })
+	if len(d.terms) > 0 {
+		pats := make([]string, len(d.terms))
+		d.termLens = make([]int, len(d.terms))
+		for i, t := range d.terms {
+			// All patterns are matched against the ASCII-lower-cased text;
+			// lower-casing leaves non-ASCII bytes alone, so CJK terms match
+			// exactly and ASCII ones case-insensitively.
+			pats[i] = asciiLower(t.value)
+			d.termLens[i] = len(pats[i])
+		}
+		d.termAC = newAhoCorasick(pats)
+	}
 	for _, a := range cfg.Allow {
 		a = strings.TrimSpace(a)
 		switch {
@@ -260,17 +312,38 @@ func (d *Detector) Find(s string) []Match {
 		}
 		cands = append(cands, cand{Match{start, end, kind, cat, v}, prio})
 	}
-	for _, r := range d.rules {
-		for _, loc := range r.re.FindAllStringSubmatchIndex(s, -1) {
+	lower := asciiLower(s)
+	run := func(r *rule, text string, off int) {
+		for _, loc := range r.re.FindAllStringSubmatchIndex(text, -1) {
 			st, en := loc[2*r.group], loc[2*r.group+1]
 			if st < 0 {
 				continue
 			}
-			if r.valid != nil && !r.valid(s[st:en]) {
+			if r.valid != nil && !r.valid(text[st:en]) {
 				continue
 			}
-			add(st, en, r.kind, r.cat, r.prio)
+			add(off+st, off+en, r.kind, r.cat, r.prio)
 		}
+	}
+	for i := range d.rules {
+		if r := &d.rules[i]; r.multiline && r.worth(lower) {
+			run(r, s, 0)
+		}
+	}
+	for ls := 0; ls < len(s); {
+		le := strings.IndexByte(s[ls:], '\n')
+		if le < 0 {
+			le = len(s)
+		} else {
+			le += ls
+		}
+		line, ll := s[ls:le], lower[ls:le]
+		for i := range d.rules {
+			if r := &d.rules[i]; !r.multiline && r.worth(ll) {
+				run(r, line, ls)
+			}
+		}
+		ls = le + 1
 	}
 	if d.cfg.Profile == Strict {
 		d.tableMatches(s, add)
@@ -284,31 +357,13 @@ func (d *Detector) Find(s string) []Match {
 			add(loc[0], loc[1], "HOST", Secret, 35)
 		}
 	}
-	if len(d.terms) > 0 {
-		var lower string
-		for _, t := range d.terms {
-			hay := s
-			needle := t.value
-			if t.ascii {
-				if lower == "" {
-					lower = asciiLower(s)
-				}
-				hay, needle = lower, t.lower
+	if d.termAC != nil {
+		d.termAC.find(lower, d.termLens, func(st, en, p int) {
+			if d.terms[p].ascii && !asciiBoundary(s, st, en) {
+				return
 			}
-			for off := 0; ; {
-				i := strings.Index(hay[off:], needle)
-				if i < 0 {
-					break
-				}
-				st := off + i
-				en := st + len(needle)
-				off = en
-				if t.ascii && !asciiBoundary(s, st, en) {
-					continue
-				}
-				add(st, en, t.kind, Doc, 200)
-			}
-		}
+			add(st, en, d.terms[p].kind, Doc, 200)
+		})
 	}
 	return resolve(cands)
 }

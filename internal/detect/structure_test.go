@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 )
@@ -63,5 +64,48 @@ func TestHonorifics(t *testing.T) {
 func TestBasicIgnoresStructure(t *testing.T) {
 	if ms := New(Config{Profile: Basic}).Find("name,phone\n王小明,0912345678\n"); len(ms) != 0 {
 		t.Fatalf("basic profile masked table cells: %v", kinds(ms))
+	}
+}
+
+// The automaton must report exactly what a naive search reports.
+func TestAhoCorasickMatchesNaiveSearch(t *testing.T) {
+	r := rand.New(rand.NewSource(99))
+	alpha := []string{"a", "b", "ab", "王", "小明", "c"}
+	for n := 0; n < 500; n++ {
+		var pats []string
+		for k := 1 + r.Intn(8); k > 0; k-- {
+			var b strings.Builder
+			for m := 1 + r.Intn(3); m > 0; m-- {
+				b.WriteString(alpha[r.Intn(len(alpha))])
+			}
+			pats = append(pats, b.String())
+		}
+		var tb strings.Builder
+		for m := r.Intn(30); m > 0; m-- {
+			tb.WriteString(alpha[r.Intn(len(alpha))])
+		}
+		text := tb.String()
+		lens := make([]int, len(pats))
+		for i, p := range pats {
+			lens[i] = len(p)
+		}
+		got := map[[3]int]bool{}
+		newAhoCorasick(pats).find(text, lens, func(s, e, p int) { got[[3]int{s, e, p}] = true })
+		want := map[[3]int]bool{}
+		for p, pat := range pats {
+			for i := 0; i+len(pat) <= len(text); i++ {
+				if text[i:i+len(pat)] == pat {
+					want[[3]int{i, i + len(pat), p}] = true
+				}
+			}
+		}
+		if len(got) != len(want) {
+			t.Fatalf("seed 99 case %d: pats %q text %q: got %d matches, want %d", n, pats, text, len(got), len(want))
+		}
+		for k := range want {
+			if !got[k] {
+				t.Fatalf("seed 99 case %d: missing %v", n, k)
+			}
+		}
 	}
 }
