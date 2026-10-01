@@ -228,6 +228,10 @@ func FindWorkspace(dir string) (Workspace, bool, error) {
 	if err != nil {
 		return Workspace{}, false, err
 	}
+	// Resolve symlinks so one folder has one identity (and one token table)
+	// however it is spelled: on macOS /var is a link to /private/var, and
+	// Claude Code and a shell can report either form.
+	dir = Canonical(dir)
 	for {
 		f := filepath.Join(dir, WorkspaceFile)
 		b, err := os.ReadFile(f)
@@ -282,8 +286,30 @@ func (w Workspace) DetectorConfig() detect.Config {
 	return c
 }
 
+// Canonical resolves symlinks in path. For a path that does not exist yet,
+// the nearest existing ancestor is resolved and the rest appended, so
+// "/var/x/new.txt" and "/private/var/x/new.txt" compare equal, and a link
+// that points into a protected folder is judged by where it points.
+func Canonical(path string) string {
+	path = filepath.Clean(path)
+	var rest []string
+	p := path
+	for {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(append([]string{r}, rest...)...)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return path
+		}
+		rest = append([]string{filepath.Base(p)}, rest...)
+		p = parent
+	}
+}
+
 // Protected reports whether an absolute path falls under one of the Protect globs.
 func (w Workspace) Protected(abs string) bool {
+	abs = Canonical(abs)
 	rel, err := filepath.Rel(w.Root, abs)
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return false
@@ -299,7 +325,7 @@ func (w Workspace) Protected(abs string) bool {
 
 // Contains reports whether abs is inside the workspace.
 func (w Workspace) Contains(abs string) bool {
-	rel, err := filepath.Rel(w.Root, abs)
+	rel, err := filepath.Rel(w.Root, Canonical(abs))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 

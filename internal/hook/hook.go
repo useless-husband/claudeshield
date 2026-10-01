@@ -472,7 +472,7 @@ var writeTools = map[string]bool{"Write": true, "Edit": true, "MultiEdit": true,
 // vault's claudeshield folder. The token tables there hold the real values,
 // and the config decides what is protected, so Claude never touches either.
 func (h *handler) ownFile(abs string) bool {
-	abs = filepath.Clean(abs)
+	abs = config.Canonical(abs)
 	for _, dir := range h.ownDirs() {
 		if abs == dir || strings.HasPrefix(abs, dir+string(filepath.Separator)) {
 			return true
@@ -482,9 +482,9 @@ func (h *handler) ownFile(abs string) bool {
 }
 
 func (h *handler) ownDirs() []string {
-	dirs := []string{filepath.Clean(h.env.Paths.State)}
+	dirs := []string{config.Canonical(h.env.Paths.State)}
 	if vault.Configured(h.env.Global) {
-		dirs = append(dirs, filepath.Clean(vault.DataDir(h.env.Paths, h.env.Global)))
+		dirs = append(dirs, config.Canonical(vault.DataDir(h.env.Paths, h.env.Global)))
 	}
 	return dirs
 }
@@ -493,7 +493,9 @@ func (h *handler) shellTouchesOwnFiles(cmd string) bool {
 	if strings.Contains(cmd, ".claudeshield") {
 		return true
 	}
-	for _, d := range h.ownDirs() {
+	dirs := h.ownDirs()
+	dirs = append(dirs, filepath.Clean(h.env.Paths.State)) // as spelled, too
+	for _, d := range dirs {
 		if d != "" && d != "." && strings.Contains(cmd, d) {
 			return true
 		}

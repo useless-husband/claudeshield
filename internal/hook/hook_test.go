@@ -424,3 +424,13 @@ func TestDecisionLogHasNoValues(t *testing.T) {
 		t.Fatalf("log lacks counts:\n%s", b)
 	}
 }
+
+func TestSymlinkIntoProtectedFolderIsDenied(t *testing.T) {
+	f := newFixture(t)
+	os.WriteFile(filepath.Join(f.ws, "raw", "orig.txt"), []byte("A123456789"), 0o600)
+	os.Symlink(filepath.Join(f.ws, "raw", "orig.txt"), filepath.Join(f.ws, "innocent.txt"))
+	out := f.run("pre-tool", map[string]any{"cwd": f.ws, "tool_name": "Read", "tool_input": map[string]any{"file_path": filepath.Join(f.ws, "innocent.txt")}})
+	if hso(out)["permissionDecision"] != "deny" {
+		t.Fatalf("symlink into raw/ not denied: %v", out)
+	}
+}
