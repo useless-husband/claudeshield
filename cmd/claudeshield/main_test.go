@@ -9,6 +9,12 @@ import (
 	"testing"
 )
 
+// Fake credentials, assembled at run time so that no credential-shaped
+// literal appears in the source (secret scanners would flag it).
+var (
+	fakeAnthropicKey = "sk-" + "ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+)
+
 // sandbox points HOME, the state dir and Claude's config dir at a temp tree.
 func sandbox(t *testing.T) (home string) {
 	home = t.TempDir()
@@ -126,7 +132,7 @@ func TestInstallUninstall(t *testing.T) {
 func TestHookThroughCLI(t *testing.T) {
 	home := sandbox(t)
 	in := `{"session_id":"x","cwd":"` + home + `","hook_event_name":"PostToolUse","tool_name":"Bash",` +
-		`"tool_input":{"command":"cat .env"},"tool_response":{"stdout":"KEY=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789","stderr":"","interrupted":false,"isImage":false}}`
+		`"tool_input":{"command":"cat .env"},"tool_response":{"stdout":"KEY=` + fakeAnthropicKey + `","stderr":"","interrupted":false,"isImage":false}}`
 	code, out, _ := runCLI(t, home, in, "hook", "post-tool")
 	if code != 0 || !strings.Contains(out, "⟦APIKEY_001⟧") || strings.Contains(out, "sk-ant-api03") {
 		t.Fatalf("hook: %d %s", code, out)
