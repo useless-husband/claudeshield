@@ -120,6 +120,9 @@ func TestInstallUninstall(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".claudeshield", "baseline.json")); err != nil {
 		t.Fatal("install did not record an extension baseline")
 	}
+	if !strings.Contains(string(b), "Read(~/.claudeshield/**)") {
+		t.Fatalf("install did not add deny rules:\n%s", b)
+	}
 	if code, _, errs := runCLI(t, home, "", "uninstall"); code != 0 {
 		t.Fatalf("uninstall: %s", errs)
 	}

@@ -112,6 +112,9 @@ func (d *Detector) tableMatches(s string, add func(start, end int, kind string, 
 			continue
 		}
 		heads := splitCells(head, offs[i], delim)
+		if len(heads) < 2 || !labelsOnly(s, heads) {
+			continue // "name, err := f()" is code, not a table header
+		}
 		kinds := make([]struct {
 			kind string
 			cat  Category
@@ -148,6 +151,21 @@ func (d *Detector) tableMatches(s string, add func(start, end int, kind string, 
 			i = j - 1
 		}
 	}
+}
+
+// labelsOnly reports whether every header cell looks like a column label:
+// short, and free of the operators and brackets that mark source code.
+func labelsOnly(s string, cells []span) bool {
+	for i, c := range cells {
+		cell := strings.TrimSpace(s[c.start:c.end])
+		if cell == "" && (i == 0 || i == len(cells)-1) {
+			continue // "| a | b |" has empty cells outside the outer pipes
+		}
+		if cell == "" || utf8.RuneCountInString(cell) > 40 || strings.ContainsAny(cell, "=:;{}[]<>\"'`$+|\\*") {
+			return false
+		}
+	}
+	return true
 }
 
 // tableDelim picks the delimiter of a header line: the one of tab, comma,

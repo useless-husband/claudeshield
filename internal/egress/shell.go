@@ -12,10 +12,11 @@ const subst = "\x00"
 
 // simpleCmd is one command in a pipeline or list, after quote removal.
 type simpleCmd struct {
-	words   []string
-	heredoc string // body of a here-document fed to this command
-	piped   bool   // stdin comes from a preceding "|"
-	pipeTo  bool   // stdout goes to a following "|"
+	words     []string
+	heredoc   string   // body of a here-document fed to this command
+	redirects []string // targets of > >> < &> redirections
+	piped     bool     // stdin comes from a preceding "|"
+	pipeTo    bool     // stdout goes to a following "|"
 }
 
 type lexed struct {
@@ -51,13 +52,14 @@ func lex(src string) lexed {
 		inWord = false
 		if redirectNext {
 			redirectNext = false
-			return // redirect target: a file, not an argument
+			cur.redirects = append(cur.redirects, w) // a file, not an argument
+			return
 		}
 		cur.words = append(cur.words, w)
 	}
 	flushCmd := func(pipeNext bool) {
 		flushWord()
-		if len(cur.words) > 0 || cur.heredoc != "" {
+		if len(cur.words) > 0 || cur.heredoc != "" || len(cur.redirects) > 0 {
 			cur.pipeTo = pipeNext
 			out.cmds = append(out.cmds, cur)
 			for i := range docs {

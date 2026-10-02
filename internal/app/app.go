@@ -4,12 +4,15 @@ package app
 
 import (
 	"path/filepath"
+	"strings"
 
 	"github.com/useless-husband/claudeshield/internal/audit"
 	"github.com/useless-husband/claudeshield/internal/config"
 	"github.com/useless-husband/claudeshield/internal/hook"
+	"github.com/useless-husband/claudeshield/internal/i18n"
 	"github.com/useless-husband/claudeshield/internal/preflight"
 	"github.com/useless-husband/claudeshield/internal/settings"
+	"github.com/useless-husband/claudeshield/internal/vault"
 )
 
 // UserSettings is ~/.claude/settings.json.
@@ -23,6 +26,17 @@ func Self(g config.Global) string {
 	return ""
 }
 
+// DenyRules are the user-level permission rules that keep Claude away from
+// claudeshield's state and the vault's claudeshield folder.
+func DenyRules(p config.Paths, g config.Global) []string {
+	home := config.Canonical(p.Home)
+	rules := settings.DenyRules(config.Canonical(p.State), home)
+	if vault.Configured(g) {
+		rules = append(rules, settings.DenyRules(vault.DataDir(p, g), home)...)
+	}
+	return rules
+}
+
 // PreflightOptions builds the full check set.
 func PreflightOptions(p config.Paths, g config.Global, cwd string, network bool) preflight.Options {
 	return preflight.Options{
@@ -30,7 +44,13 @@ func PreflightOptions(p config.Paths, g config.Global, cwd string, network bool)
 		Audit: func(cwd string) []preflight.Finding {
 			return audit.Findings(audit.Options{Paths: p, Cwd: cwd, Self: Self(g)})
 		},
-		HooksInstalled: func() (bool, string) { return settings.Installed(UserSettings(p)) },
+		HooksInstalled: func() (bool, string) {
+			ok, why := settings.Installed(UserSettings(p), Self(g))
+			if missing := settings.HasDeny(UserSettings(p), DenyRules(p, g)); len(missing) > 0 {
+				ok, why = false, strings.TrimSpace(why+" "+i18n.Tf("缺少權限規則：%s", "missing permission rules: %s", strings.Join(missing, ", ")))
+			}
+			return ok, why
+		},
 	}
 }
 
@@ -46,7 +66,12 @@ func HookEnv(p config.Paths, g config.Global, cfgErr error) hook.Env {
 	return hook.Env{
 		Paths: p, Global: g, ConfigErr: cfgErr,
 		Preflight: func(cwd string) preflight.Report {
-			return preflight.Run(PreflightOptions(p, g, cwd, true))
+			// A hook that is running is proof the hooks are active, and they
+			// may legitimately come from another settings scope (a project's
+			// settings, or --settings), so the install check is a CLI matter.
+			o := PreflightOptions(p, g, cwd, true)
+			o.HooksInstalled = nil
+			return preflight.Run(o)
 		},
 	}
 }

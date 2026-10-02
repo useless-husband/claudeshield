@@ -28,8 +28,55 @@ type Result struct {
 	Publish     bool     // it publishes (git push, gh create, npm publish, ...)
 	UnknownHost bool     // at least one destination could not be determined
 	Obfuscated  bool     // eval / decode-and-run / ANSI-C escapes around it
+	Transform   bool     // output is a derived form of the input (encoded, sliced, hashed, compared)
 	Hosts       []string // destinations, lower-cased, sorted
 	Reasons     []string // short machine-readable reasons, for logs and messages
+}
+
+// Programs whose output is a transformed copy of their input. Pattern-based
+// masking recognises values, not encodings or fragments of them, so a
+// command that expands placeholders and then transforms them is treated
+// differently from one that merely passes them to a local tool.
+var transformProgs = map[string]bool{
+	"base64": true, "gbase64": true, "base32": true, "xxd": true, "od": true, "hexdump": true, "hd": true,
+	"rev": true, "tr": true, "cut": true, "fold": true, "md5": true, "md5sum": true, "shasum": true,
+	"sha1sum": true, "sha256sum": true, "sha512sum": true, "cksum": true, "openssl": true, "expr": true,
+	"bc": true, "test": true, "[": true, "[[": true, "cmp": true, "iconv": true, "jq": true,
+}
+
+var compareOps = map[string]bool{"==": true, "!=": true, "-eq": true, "-ne": true, "-gt": true, "-lt": true, "-ge": true, "-le": true, "=~": true}
+
+func isTransform(prog string, args []string) bool {
+	if transformProgs[prog] {
+		return true
+	}
+	switch prog {
+	case "head", "tail":
+		return containsAny(args, "-c")
+	case "awk":
+		return containsAny(args, "substr", "sprintf", "toupper", "tolower")
+	case "sed":
+		return containsAny(args, "s/", "y/")
+	case "printf":
+		return containsAny(args, "%x", "%X", "%o", "%d", "%c")
+	}
+	for _, a := range args {
+		if compareOps[a] {
+			return true
+		}
+	}
+	return isShellOrInterp(prog) && inlineCode(prog, args) != ""
+}
+
+func containsAny(args []string, subs ...string) bool {
+	for _, a := range args {
+		for _, s := range subs {
+			if strings.Contains(a, s) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *Result) host(h string) {
@@ -66,6 +113,7 @@ func (r *Result) merge(o Result) {
 	r.Publish = r.Publish || o.Publish
 	r.UnknownHost = r.UnknownHost || o.UnknownHost
 	r.Obfuscated = r.Obfuscated || o.Obfuscated
+	r.Transform = r.Transform || o.Transform
 	for _, h := range o.Hosts {
 		r.host(h)
 	}
@@ -121,6 +169,10 @@ func analyze(cmd string, o Options, depth int) Result {
 		}
 		prog := path.Base(words[0])
 		args := words[1:]
+		if isTransform(prog, args) {
+			r.Transform = true
+			r.reason("transform:" + prog)
+		}
 		if c.piped && isShellOrInterp(prog) && len(nonFlags(args)) == 0 {
 			if decoderUpstream {
 				r.Obfuscated = true
@@ -409,6 +461,11 @@ func analyzeOne(prog string, args []string, c simpleCmd, o Options, depth int) R
 	case "mail", "mailx", "sendmail", "mutt", "msmtp", "swaks":
 		r.Network, r.DataOut, r.UnknownHost = true, true, true
 		r.reason("mail")
+	case "pbcopy", "xclip", "xsel", "wl-copy":
+		// The clipboard syncs to other devices (Universal Clipboard, cloud
+		// clipboard managers), so it counts as leaving the machine.
+		r.DataOut, r.UnknownHost = true, true
+		r.reason("clipboard")
 	case "dig", "nslookup", "host", "drill", "ping", "ping6", "traceroute", "traceroute6", "whois", "mtr":
 		r.Network = true
 		for _, a := range nonFlags(args) {
@@ -481,6 +538,10 @@ func analyzeOne(prog string, args []string, c simpleCmd, o Options, depth int) R
 		if strings.Contains(script, "do shell script") || netCode.MatchString(script) {
 			r.Network, r.UnknownHost, r.Obfuscated = true, true, true
 			r.reason("osascript-shell")
+		} else if strings.Contains(script, "tell app") || len(args) == 0 {
+			// Any scripted application (Mail, Messages, a browser) can send data out.
+			r.DataOut, r.UnknownHost = true, true
+			r.reason("osascript-app")
 		}
 	case "python", "python3", "python2", "node", "deno", "ruby", "perl", "php", "pwsh", "lua", "Rscript", "julia", "swift":
 		code := inlineCode(prog, args) + c.heredoc

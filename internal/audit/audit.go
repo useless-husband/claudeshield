@@ -247,9 +247,14 @@ func hookItems(scope string, v any, self string) []Item {
 	return out
 }
 
+// isSelf recognises exactly the handlers install writes: exec form, the
+// installed executable, args ["hook", <event>]. A shell-form handler that
+// merely starts with the same path ("…/claudeshield hook pre-tool; curl …")
+// is somebody else's and is reported.
 func isSelf(h map[string]any, self string) bool {
 	cmd, _ := h["command"].(string)
-	return cmd == self || strings.HasPrefix(cmd, self+" ")
+	args, _ := h["args"].([]any)
+	return cmd == self && len(args) == 2 && fmt.Sprint(args[0]) == "hook"
 }
 
 func describeHook(h map[string]any) string {

@@ -10,10 +10,13 @@
 package detect
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"math"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -296,7 +299,11 @@ var DefaultAllow = []string{"*@example.com", "*@example.org", "*@example.net", "
 // Find returns non-overlapping matches ordered by position. Leftmost wins; for
 // two matches starting at the same byte the longer wins, then the higher
 // priority rule.
-func (d *Detector) Find(s string) []Match {
+func (d *Detector) Find(s string) []Match { return d.find(s, true) }
+
+// find is Find; decode=false skips the encoded-content pass (used on text
+// that was itself decoded, so decoding never recurses).
+func (d *Detector) find(s string, decode bool) []Match {
 	if s == "" {
 		return nil
 	}
@@ -365,7 +372,111 @@ func (d *Detector) Find(s string) []Match {
 			add(st, en, d.terms[p].kind, Doc, 200)
 		})
 	}
+	if decode {
+		d.encoded(s, add)
+	}
 	return resolve(cands)
+}
+
+// encoded reports runs that decode (base64 or hex) to text in which the
+// detector finds something. "echo ⟦ID_001⟧ | base64" would otherwise print a
+// form of the value that no pattern recognises. Candidates are found with a
+// single byte scan rather than regular expressions, since this runs on every
+// tool result.
+func (d *Detector) encoded(s string, add func(start, end int, kind string, cat Category, prio int)) {
+	try := func(start, end int, dec []byte, ok bool) {
+		if !ok || !printableText(dec) {
+			return
+		}
+		if ms := d.find(string(dec), false); len(ms) > 0 {
+			add(start, end, "ENCODED", ms[0].Category, 15)
+		}
+	}
+	for i := 0; i < len(s); {
+		if !isB64Byte(s[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && isB64Byte(s[j]) {
+			j++
+		}
+		run := s[i:j]
+		end := j
+		for end < len(s) && s[end] == '=' && end-j < 2 {
+			end++
+		}
+		if len(run) >= 24 {
+			// Hex is a subset of the base64 alphabet: try it first on runs made
+			// only of hex digits (underscore and dash cover URL-safe base64).
+			if isHexRun(run) && len(run)%2 == 0 && (i == 0 || !isWordByte(s[i-1])) && (j == len(s) || !isWordByte(s[j])) {
+				dec, err := hex.DecodeString(run)
+				try(i, j, dec, err == nil)
+			} else if mixedAlphabet(run) {
+				dec, ok := decodeBase64(run)
+				try(i, end, dec, ok)
+			}
+		}
+		i = end
+	}
+}
+
+func isB64Byte(c byte) bool {
+	return c == '+' || c == '/' || c == '_' || c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isHexRun(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// mixedAlphabet reports whether s has upper-case, lower-case and digits, as
+// base64 of ordinary text almost always does and long identifiers rarely do.
+func mixedAlphabet(s string) bool {
+	var up, low, dig bool
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= 'A' && c <= 'Z':
+			up = true
+		case c >= 'a' && c <= 'z':
+			low = true
+		case c >= '0' && c <= '9':
+			dig = true
+		}
+	}
+	return up && low && dig
+}
+
+func decodeBase64(s string) ([]byte, bool) {
+	s = strings.TrimRight(s, "=")
+	for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
+		if b, err := enc.DecodeString(s); err == nil {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
+// printableText reports whether b is valid UTF-8 made of printable runes and
+// ordinary whitespace, so binary blobs are never scanned.
+func printableText(b []byte) bool {
+	if !utf8.Valid(b) {
+		return false
+	}
+	for _, r := range string(b) {
+		if r == '\n' || r == '\t' || r == '\r' {
+			continue
+		}
+		if r < 0x20 || r == 0x7f || !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
 }
 
 type cand struct {

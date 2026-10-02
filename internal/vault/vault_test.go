@@ -45,7 +45,44 @@ func realVault(t *testing.T) (config.Paths, config.Global) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { Close(p, g, true) })
+	if err := Open(p, g, []byte("correct horse")); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := NewID()
+	if err := WriteMarker(MountPoint(p, g), id); err != nil {
+		t.Fatal(err)
+	}
+	g.Vault.ID = id
+	if ok, img, err := BackedBy(p, g); err != nil || !ok {
+		t.Fatalf("BackedBy: ok=%v img=%q err=%v", ok, img, err)
+	}
+	if err := Close(p, g, false); err != nil {
+		t.Fatal(err)
+	}
 	return p, g
+}
+
+func TestImageForMount(t *testing.T) {
+	plist := `<dict><key>image-path</key><string>/a/one.sparsebundle</string>
+<key>system-entities</key><array><dict><key>mount-point</key><string>/Volumes/One</string></dict></array></dict>
+<dict><key>image-path</key><string>/b/two.dmg</string><key>system-entities</key><array>
+<dict><key>dev-entry</key><string>/dev/disk9s1</string><key>mount-point</key><string>/Volumes/Two</string></dict></array></dict>`
+	if img, ok := imageForMount(plist, "/Volumes/Two"); !ok || img != "/b/two.dmg" {
+		t.Fatalf("got %q %v", img, ok)
+	}
+	if _, ok := imageForMount(plist, "/Volumes/Three"); ok {
+		t.Fatal("unknown mount found")
+	}
+}
+
+func TestMountedRequiresMarker(t *testing.T) {
+	p := config.Paths{VolumesDir: "/"}
+	g := config.Global{Vault: config.VaultConfig{Image: "/x", Volume: "System", ID: "abc"}}
+	// /System is a directory on the root volume; it is not even a mount
+	// point, but the marker check must also fail for a real mount without one.
+	if Mounted(p, g) {
+		t.Fatal("mounted without marker")
+	}
 }
 
 func TestCreateOpenCloseWithRealImage(t *testing.T) {

@@ -36,6 +36,14 @@ func (c *cli) initWorkspace(args []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	dir = config.Canonical(dir)
+	switch {
+	case dir == "/" || dir == config.Canonical(c.p.Home):
+		return fmt.Errorf("%s", i18n.T("不能把家目錄或根目錄整個標記成敏感資料夾；請為機密資料建立一個專用資料夾。", "the home or root directory cannot be a sensitive workspace; create a dedicated folder for the sensitive data"))
+	case dir == config.Canonical(c.p.State) || strings.HasPrefix(dir, config.Canonical(c.p.State)+"/") ||
+		dir == config.Canonical(c.p.ClaudeDir) || strings.HasPrefix(dir, config.Canonical(c.p.ClaudeDir)+"/"):
+		return fmt.Errorf("%s", i18n.T("這是 ClaudeShield 或 Claude Code 自己的設定資料夾，不能當工作資料夾。", "that is ClaudeShield's or Claude Code's own configuration folder, not a place for work"))
+	}
 	marker := filepath.Join(dir, config.WorkspaceFile)
 	ws := config.DefaultWorkspace()
 	if b, err := os.ReadFile(marker); err == nil {
@@ -62,6 +70,18 @@ func (c *cli) initWorkspace(args []string) error {
 	}
 	if err := settings.MergeWorkspaceSettings(local, ws, own...); err != nil {
 		return err
+	}
+	registered := false
+	for _, w := range c.g.Workspaces {
+		if config.Canonical(w) == dir {
+			registered = true
+		}
+	}
+	if !registered {
+		c.g.Workspaces = append(c.g.Workspaces, dir)
+		if err := config.SaveGlobal(c.p, c.g); err != nil {
+			return err
+		}
 	}
 	// Keep the marker (it lists client names) and the local settings out of git.
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {

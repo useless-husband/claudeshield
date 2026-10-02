@@ -30,6 +30,7 @@ import (
 	"github.com/useless-husband/claudeshield/internal/egress"
 	"github.com/useless-husband/claudeshield/internal/i18n"
 	"github.com/useless-husband/claudeshield/internal/preflight"
+	"github.com/useless-husband/claudeshield/internal/settings"
 	"github.com/useless-husband/claudeshield/internal/tokenmap"
 	"github.com/useless-husband/claudeshield/internal/vault"
 )
@@ -47,6 +48,7 @@ type Input struct {
 	ToolUseID      string         `json:"tool_use_id"`
 	Prompt         string         `json:"prompt"`
 	Delta          string         `json:"delta"`
+	FilePath       string         `json:"file_path"` // ConfigChange
 	Source         string         `json:"source"`
 	AgentID        string         `json:"agent_id"`
 }
@@ -103,13 +105,31 @@ func wrapShell(cmd string) string {
 }
 
 // Run handles one hook event. It returns the process exit code.
-func Run(event string, stdin io.Reader, stdout io.Writer, env Env) int {
+func Run(event string, stdin io.Reader, stdout io.Writer, env Env) (code int) {
 	env.defaults()
+	var in Input
+	// A panic must not fail open: a crashed PostToolUse hook would let the
+	// original, unmasked result through, so every string in it is blanked.
+	defer func() {
+		if rec := recover(); rec != nil {
+			err := fmt.Errorf("panic: %v", rec)
+			env.Now = time.Now // the panic may have come from an injected dependency
+			if (event == "post-tool" || event == "PostToolUse") && in.ToolResponse != nil {
+				writeJSON(stdout, map[string]any{
+					"systemMessage":      i18n.Tf("ClaudeShield 內部錯誤，這次的工具結果已整個遮掉：%v", "ClaudeShield internal error; this tool result was blanked: %v", err),
+					"hookSpecificOutput": map[string]any{"hookEventName": "PostToolUse", "updatedToolOutput": blankStrings(in.ToolResponse)},
+				})
+				logEvent(env, map[string]any{"event": event, "error": err.Error()})
+				code = 0
+				return
+			}
+			code = failure(stdout, event, env, in.Cwd, err)
+		}
+	}()
 	raw, err := io.ReadAll(io.LimitReader(stdin, 64<<20))
 	if err != nil {
 		return failure(stdout, event, env, "", fmt.Errorf("read stdin: %w", err))
 	}
-	var in Input
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber() // keep numbers exact when echoing tool inputs and outputs back
 	if err := dec.Decode(&in); err != nil {
@@ -133,6 +153,8 @@ func Run(event string, stdin io.Reader, stdout io.Writer, env Env) int {
 		err = h.postTool()
 	case "display", "MessageDisplay":
 		err = h.display()
+	case "config-change", "ConfigChange":
+		err = h.configChange()
 	default:
 		err = fmt.Errorf("unknown hook event %q", event)
 	}
@@ -212,17 +234,20 @@ var errVaultClosed = vault.ErrClosed
 // should be masked.
 func (h *handler) detectorConfig(path string) (detect.Config, bool) {
 	h.context()
-	if path != "" {
-		if ws, ok, err := config.FindWorkspace(filepath.Dir(path)); ok && err == nil {
-			return ws.DetectorConfig(), true
-		}
-	}
+	// A session inside a workspace masks strictly whatever file it reads:
+	// Claude Code writes background command output and spilled results to
+	// temporary files outside the workspace, and those carry workspace data.
 	if h.inWS && h.wsErr == nil {
 		return h.ws.DetectorConfig(), true
 	}
 	if h.inWS {
 		// Unreadable marker: mask everything with default categories.
 		return detect.Config{Profile: detect.Strict, Allow: detect.DefaultAllow}, true
+	}
+	if path != "" {
+		if ws, ok, err := config.FindWorkspace(filepath.Dir(path)); ok && err == nil {
+			return ws.DetectorConfig(), true
+		}
 	}
 	if !h.env.Global.MaskingOn() {
 		return detect.Config{}, false
@@ -506,6 +531,106 @@ func (h *handler) shellTouchesOwnFiles(cmd string) bool {
 	return false
 }
 
+// registeredWorkspaces returns the canonical roots `claudeshield init` recorded.
+func (h *handler) registeredWorkspaces() []string {
+	var out []string
+	for _, w := range h.env.Global.Workspaces {
+		if w != "" {
+			out = append(out, config.Canonical(w))
+		}
+	}
+	return out
+}
+
+// foreignWorkspace returns the root of a registered workspace that contains
+// abs while this session runs outside it. Workspace data is handled only by
+// sessions started inside the workspace, where its rules apply in full.
+func (h *handler) foreignWorkspace(abs string) string {
+	h.context()
+	c := config.Canonical(abs)
+	for _, root := range h.registeredWorkspaces() {
+		if (c == root || strings.HasPrefix(c, root+"/")) && !(h.inWS && config.Canonical(h.ws.Root) == root) {
+			return root
+		}
+	}
+	return ""
+}
+
+// foreignWorkspaceInText is the best-effort form for shell commands: a
+// command that spells out another workspace's path (absolute or ~) is refused.
+func (h *handler) foreignWorkspaceInText(cmd string) string {
+	h.context()
+	for _, root := range h.registeredWorkspaces() {
+		if h.inWS && config.Canonical(h.ws.Root) == root {
+			continue
+		}
+		for _, form := range pathForms(root, h.env.Paths.Home) {
+			if strings.Contains(cmd, form) {
+				return root
+			}
+		}
+	}
+	return ""
+}
+
+func pathForms(root, home string) []string {
+	forms := []string{root}
+	if strings.HasPrefix(root, "/private/") {
+		forms = append(forms, strings.TrimPrefix(root, "/private"))
+	}
+	if home != "" && strings.HasPrefix(root, home+"/") {
+		forms = append(forms, "~"+root[len(home):])
+	}
+	return forms
+}
+
+func foreignReason(root string) string {
+	return i18n.Tf("ClaudeShield：%s 是另一個敏感資料夾，只有在那個資料夾裡啟動的 Claude Code 才能處理它的檔案。請使用者 cd 進去再開 Claude。",
+		"ClaudeShield: %s is a sensitive workspace; only a Claude Code session started inside it may touch its files. Ask the user to cd there and start Claude.", root)
+}
+
+// symlinkUnder returns the first path component below root (up to and
+// including abs) that is a symbolic link, or "".
+func symlinkUnder(root, abs string) string {
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	p := root
+	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
+		p = filepath.Join(p, seg)
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return p
+		}
+	}
+	return ""
+}
+
+var magics = [][]byte{
+	[]byte("\x89PNG"), []byte("\xff\xd8\xff"), []byte("GIF8"), []byte("%PDF"), []byte("PK\x03\x04"),
+	[]byte("BM"), []byte("II*\x00"), []byte("MM\x00*"), []byte("\x1f\x8b"), []byte("7z\xbc\xaf"),
+	[]byte("SQLite format 3"), []byte("\xcf\xfa\xed\xfe"), []byte("\xca\xfe\xba\xbe"),
+}
+
+// looksBinary sniffs the first bytes of a file for image, PDF, archive,
+// Office (zip) and database signatures, whatever the extension says.
+func looksBinary(abs string) bool {
+	f, err := os.Open(abs)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	head := make([]byte, 16)
+	n, _ := io.ReadFull(f, head)
+	head = head[:n]
+	for _, m := range magics {
+		if bytes.HasPrefix(head, m) {
+			return true
+		}
+	}
+	return n >= 12 && bytes.Equal(head[4:8], []byte("ftyp")) || n >= 12 && bytes.HasPrefix(head, []byte("RIFF")) && bytes.Equal(head[8:12], []byte("WEBP"))
+}
+
 func selfProtectReason() string {
 	return i18n.T("ClaudeShield：這是 ClaudeShield 自己的設定或代號對照表（裡面有真實資料），Claude 不能讀取或修改。要改設定請使用者自己在終端機操作。",
 		"ClaudeShield: this is ClaudeShield's own configuration or placeholder table (it holds the real values), which Claude may not read or change. The user can change settings in a terminal.")
@@ -576,13 +701,20 @@ func (h *handler) decidePreTool() decision {
 			if h.ownFile(abs) || (writeTools[tool] && filepath.Base(config.Canonical(abs)) == config.WorkspaceFile) {
 				return deny(selfProtectReason())
 			}
+			if root := h.foreignWorkspace(abs); root != "" {
+				return deny(foreignReason(root))
+			}
 			if ws, ok, _ := config.FindWorkspace(filepath.Dir(abs)); ok {
+				if link := symlinkUnder(ws.Root, abs); link != "" {
+					return deny(i18n.Tf("ClaudeShield：%s 是敏感資料夾裡的符號連結，為了避免被指到受保護的檔案，敏感資料夾裡不跟隨連結。請改用它指向的實際路徑。",
+						"ClaudeShield: %s is a symbolic link inside a sensitive workspace; links are not followed there, since one could point at a protected file. Use the real path instead.", link))
+				}
 				if ws.Protected(abs) {
 					return deny(i18n.Tf("ClaudeShield：%s 在受保護的範圍（%s），Claude 不能讀取或修改。需要用到的話，請使用者用 claudeshield mask 產生遮罩版放到別的資料夾。",
 						"ClaudeShield: %s is protected (%s); Claude may not read or change it. If it is needed, the user can create a masked copy elsewhere with `claudeshield mask`.",
 						p, strings.Join(ws.Protect, ", ")))
 				}
-				if tool == "Read" && binaryExt[strings.ToLower(filepath.Ext(abs))] && !ws.BinaryReads {
+				if tool == "Read" && !ws.BinaryReads && (binaryExt[strings.ToLower(filepath.Ext(abs))] || looksBinary(abs)) {
 					return deny(i18n.Tf("ClaudeShield：%s 是二進位檔（PDF、圖片或 Office 檔），內容沒辦法遮罩，所以不能讀。請使用者先轉成文字檔，例如 Word 檔用 `textutil -convert txt 檔名.docx`，PDF 用 `pdftotext 檔名.pdf`，再讀轉出來的 .txt。",
 						"ClaudeShield: %s is a binary file (PDF, image or Office document) whose content cannot be masked. Convert it to text first, e.g. `textutil -convert txt file.docx` or `pdftotext file.pdf`, and read the .txt instead.", p))
 				}
@@ -592,8 +724,12 @@ func (h *handler) decidePreTool() decision {
 	}
 
 	if shellTools[tool] {
-		if cmd, _ := h.in.ToolInput["command"].(string); h.shellTouchesOwnFiles(cmd) {
+		cmd, _ := h.in.ToolInput["command"].(string)
+		if h.shellTouchesOwnFiles(cmd) {
 			return deny(selfProtectReason())
+		}
+		if root := h.foreignWorkspaceInText(cmd); root != "" {
+			return deny(foreignReason(root))
 		}
 	}
 
@@ -703,6 +839,18 @@ func (h *handler) shell() decision {
 		return deny(i18n.Tf("ClaudeShield：這個指令裡有代號，而且會連到 %s。執行時代號會換回真實資料，等於把機密送出這台電腦，所以不允許。",
 			"ClaudeShield: this command contains placeholders and connects to %s. Running it would expand them into real values and send those off this machine, so it is refused.", where))
 	}
+	if hasTokens && r.Transform {
+		msg := i18n.Tf("ClaudeShield：這個指令會對代號代表的真實內容做轉換（%s），輸出會是機密的另一種形式，遮罩認不出來。請改成在檔案上操作，或讓程式把結果寫進檔案。",
+			"ClaudeShield: this command transforms the real values behind the placeholders (%s); the output would be a form of them that masking cannot recognise. Work on the files instead, or have a script write its result to a file.", strings.Join(r.Reasons, ", "))
+		if h.inWS {
+			return deny(msg)
+		}
+		return ask(msg)
+	}
+	if hasTokens && !h.inWS && (r.DataOut || r.Publish) {
+		return ask(i18n.Tf("ClaudeShield：這個指令會把代號換回真實內容後送出或發佈（%s → %s）。確定嗎？",
+			"ClaudeShield: this command would expand placeholders into real values and send or publish them (%s → %s). Proceed?", strings.Join(r.Reasons, ", "), where))
+	}
 	if r.Obfuscated {
 		msg := i18n.Tf("ClaudeShield：這個指令用了混淆手法（%s），看不出實際會做什麼。", "ClaudeShield: this command is obfuscated (%s), so what it really does cannot be checked.", strings.Join(r.Reasons, ", "))
 		if h.inWS {
@@ -718,18 +866,27 @@ func (h *handler) shell() decision {
 		}
 		return ask(msg)
 	}
-	if h.inWS && r.Publish {
-		return ask(i18n.Tf("ClaudeShield：這個指令會把東西公開或上傳（%s → %s）。敏感資料夾裡每次都要你確認。", "ClaudeShield: this command publishes or uploads (%s → %s). In a sensitive workspace you confirm each time.", strings.Join(r.Reasons, ", "), where))
+	if h.inWS && (r.Publish || r.DataOut) {
+		// Even an allowlisted host (a package registry, GitHub) accepts
+		// uploads, so sending data anywhere from a workspace is confirmed.
+		return ask(i18n.Tf("ClaudeShield：這個指令會把資料送出或發佈（%s → %s）。敏感資料夾裡每次都要你確認。", "ClaudeShield: this command sends or publishes data (%s → %s). In a sensitive workspace you confirm each time.", strings.Join(r.Reasons, ", "), where))
 	}
 	if h.inWS && r.Network && !r.AllHostsAllowed(allow) {
 		return ask(i18n.Tf("ClaudeShield：這個指令會連到白名單以外的地方：%s。", "ClaudeShield: this command connects to a destination not on the allowlist: %s.", where))
 	}
 	wrap := h.inWS && h.in.ToolName == "Bash" && h.ws.SandboxStrict(filepath.Join(h.env.Paths.ClaudeDir, "settings.json"))
-	if !hasTokens && !wrap {
+	bg, _ := h.in.ToolInput["run_in_background"].(bool)
+	if !hasTokens && !wrap && !(h.inWS && bg) {
 		return decision{}
 	}
 	in := cloneMap(h.in.ToolInput)
 	in["command"] = real
+	if h.inWS && bg {
+		// A background command's output is written to a file outside the
+		// workspace and read back later; keep it in the foreground so its
+		// result passes through PostToolUse in this session.
+		in["run_in_background"] = false
+	}
 	v := h.rewriteVerdict()
 	if wrap {
 		in["command"] = wrapShell(real)
@@ -870,7 +1027,75 @@ func (h *handler) display() error {
 	return writeJSON(h.out, map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "MessageDisplay", "displayContent": out}})
 }
 
+// --- ConfigChange --------------------------------------------------------------
+
+// configChange keeps a settings edit made during a session from taking
+// effect when it would switch ClaudeShield off: hooks removed or disabled,
+// traffic redirected, or a workspace's sandbox weakened. The file on disk is
+// already changed; preflight catches it at the next start, and
+// `claudeshield check` explains it.
+func (h *handler) configChange() error {
+	h.context()
+	block := func(why string) error {
+		logEvent(h.env, map[string]any{"event": "ConfigChange", "session": h.in.SessionID, "source": h.in.Source, "decision": "block", "why": why})
+		return writeJSON(h.out, map[string]any{"decision": "block", "reason": why})
+	}
+	if h.in.FilePath == "" || h.in.Source == "policy_settings" || h.in.Source == "skills" {
+		return nil
+	}
+	m, err := settings.Read(h.in.FilePath)
+	if err != nil {
+		return block("unreadable settings file")
+	}
+	if b, _ := m["disableAllHooks"].(bool); b {
+		return block("disableAllHooks")
+	}
+	if env, ok := m["env"].(map[string]any); ok {
+		vars := map[string]string{}
+		for k, v := range env {
+			vars[k] = fmt.Sprint(v)
+		}
+		for _, f := range preflight.EnvFindings(vars, h.in.FilePath) {
+			if f.Severity == preflight.Block {
+				return block(f.ID)
+			}
+		}
+	}
+	if h.in.Source == "user_settings" && h.env.Global.Installed != nil {
+		if ok, why := settings.Installed(h.in.FilePath, h.env.Global.Installed.Executable); !ok {
+			return block("hooks: " + why)
+		}
+	}
+	if h.inWS && h.wsErr == nil && (h.in.Source == "project_settings" || h.in.Source == "local_settings") &&
+		!h.ws.SandboxStrict(filepath.Join(h.env.Paths.ClaudeDir, "settings.json")) {
+		return block("workspace sandbox weakened")
+	}
+	logEvent(h.env, map[string]any{"event": "ConfigChange", "session": h.in.SessionID, "source": h.in.Source, "decision": ""})
+	return nil
+}
+
 // --- helpers -----------------------------------------------------------------
+
+// blankStrings replaces every string leaf with a marker, keeping the shape.
+func blankStrings(v any) any {
+	switch x := v.(type) {
+	case string:
+		return "⟦REDACTED⟧"
+	case map[string]any:
+		cp := make(map[string]any, len(x))
+		for k, e := range x {
+			cp[k] = blankStrings(e)
+		}
+		return cp
+	case []any:
+		cp := make([]any, len(x))
+		for i, e := range x {
+			cp[i] = blankStrings(e)
+		}
+		return cp
+	}
+	return v
+}
 
 func vaultClosedReason() string {
 	return i18n.T("ClaudeShield：加密保險箱沒有打開，代號沒辦法換回真實內容。請使用者在終端機執行 claudeshield vault open。",

@@ -1,6 +1,8 @@
 package detect
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"math/rand"
 	"strings"
 	"testing"
@@ -106,6 +108,34 @@ func TestAhoCorasickMatchesNaiveSearch(t *testing.T) {
 			if !got[k] {
 				t.Fatalf("seed 99 case %d: missing %v", n, k)
 			}
+		}
+	}
+}
+
+func TestCodeIsNotATable(t *testing.T) {
+	code := "name, err := lookup(id)\nphone, ok := m[\"phone\"]\nemail, _ = strings.Cut(s, \"@\")\n"
+	if ms := strict().Find(code); len(ms) != 0 {
+		t.Fatalf("code masked as table cells: %v", kinds(ms))
+	}
+}
+
+func TestEncodedValuesAreDetected(t *testing.T) {
+	id := "A123456789"
+	b64 := base64.StdEncoding.EncodeToString([]byte("id=" + id + " phone 0912-345-678"))
+	hx := hex.EncodeToString([]byte("客戶：王小明"))
+	got := kinds(strict().Find("out: " + b64 + " and " + hx + " and " + id))
+	want := []string{"ENCODED=" + b64, "ENCODED=" + hx, "TWID=" + id}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	// Binary and innocuous base64 are left alone.
+	for _, s := range []string{
+		base64.StdEncoding.EncodeToString([]byte{0, 1, 2, 3, 0xff, 0xfe, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4}),
+		base64.StdEncoding.EncodeToString([]byte("just some ordinary words here")),
+		"3f786850e387550fdab836ed7e6dc881de23001b", // a git SHA
+	} {
+		if ms := strict().Find(s); len(ms) != 0 {
+			t.Errorf("%q flagged: %v", s, kinds(ms))
 		}
 	}
 }

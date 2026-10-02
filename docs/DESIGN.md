@@ -150,3 +150,28 @@ ClaudeShield depends on details of Claude Code's hook contract. These were check
 - **An LLM or NER model for detection.** Better recall on free-text names, but hooks run on every tool call; a model adds hundreds of milliseconds and a large dependency. Patterns plus user terms keep it a single ~6 MB binary running in single-digit milliseconds.
 - **Masking file contents on disk** (keeping a masked working copy and syncing back). Two copies drift, and Claude's edits would have to be merged back. Masking at the hook boundary keeps one copy.
 - **Failing open everywhere.** A bug in a security hook that silently allows is worse than one that refuses. ClaudeShield fails closed inside workspaces (a prompt or tool call it could not inspect does not go through) and open elsewhere with a visible warning, so a bug cannot freeze every session on the machine.
+
+## Self-review findings
+
+After the first complete version, the code was reread as an attacker would read it. Each finding below was fixed and has a regression test.
+
+| Finding | Fix |
+| --- | --- |
+| A command that expands placeholders can print a *transformed* copy of the values (`echo ⟦ID_001⟧ \| base64`, `cut -c1-3`, a string comparison), which no pattern recognises | `egress` marks encoders, slicers, hashes, comparisons and inline interpreter code as *Transform*; with placeholders in the command it is refused in a workspace and confirmed elsewhere. The detector also decodes base64 and hex runs in results and masks those that decode to something sensitive |
+| Uploads to an allowlisted host (`curl -d @file https://api.github.com/gists`) passed silently in a workspace | Any command that sends or publishes data from a workspace asks, whatever the host |
+| Background commands write their output to a file outside the workspace, which is then read with `Read` under the ordinary profile (`scripts/probes/background.py`) | A workspace session masks strictly whatever it reads, wherever the file is, and keeps commands in the foreground |
+| A session started outside a workspace could read the workspace's files with weaker rules | `init` registers workspaces; a session outside one may not touch its files |
+| A protected folder named after a client reached the hook as `⟦CLIENT_001⟧/…` and escaped the path check | Path checks run on the expanded input |
+| A symlink inside the workspace pointing at a protected file, created by a background command between check and read | Symlinks under the workspace root are not followed at all |
+| An image or PDF with a text extension is returned as an image, which masking skips | Files are sniffed by signature, not only by extension |
+| `pbcopy` and scripted applications (`osascript … tell app "Mail"`) leave the machine without a network command | Treated as outbound data |
+| Go code such as `name, err := f()` followed by a similar line looked like a two-column table with a `name` header | Header cells must look like labels: short, no operators or brackets |
+| A handler whose command *began* with the installed path (`…/claudeshield hook pre-tool; curl …`) counted as ClaudeShield's own, so the audit skipped it and `Installed` accepted it | Exact exec-form match: the installed path and `["hook", <event>]` |
+| Any disk image attached under the vault's name passed as the vault | A random identity written into the vault at creation and checked on every mount; preflight also asks `hdiutil` which image backs the mount point |
+| Missing hooks were only a warning, so `claudeshield run` would start Claude Code with nothing enforcing anything inside | A blocking finding that cannot be acknowledged |
+| Edits to settings during a session (`disableAllHooks`, a redirecting `env`, hooks removed, a workspace's sandbox turned off) took effect immediately | A `ConfigChange` hook keeps such edits from applying to the running session; preflight reports them at the next start |
+| Claude's file tools could reach `~/.claudeshield` from an ordinary session through a differently spelled path | `install` adds `Read`/`Edit` deny rules for the state directory and the vault's folder, which Claude Code applies to its file tools, `@` mentions and recognised shell file commands |
+| A panic inside the PostToolUse hook would let the original result through | The hook recovers and returns the result with every string blanked |
+| `claudeshield init` in the home directory would make everything a workspace | Refused, as are ClaudeShield's and Claude Code's own folders |
+
+Two findings are limits rather than fixes, and are stated in the README: a script that reads the real files locally can print any derived form of them (a total, a first character), and the Spotlight index, APFS snapshots and the per-session scratch directory under the system temp folder can hold plaintext that the vault does not cover.

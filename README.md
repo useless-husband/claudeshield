@@ -141,8 +141,10 @@ Everything below was run on this machine against Claude Code v2.1.287; the comma
 - PostToolUseFailure can neither rewrite a failed command's output nor stop the turn (`"continue": false` is ignored there), and Claude Code's Bash tool rejects `trap` and cannot pre-check `{ }` groups or `$?`. ClaudeShield therefore wraps commands only in workspaces whose sandbox auto-allows every command, and returns `allow` there; see [the design notes](docs/DESIGN.md#the-failed-command-problem).
 - A real AES-256 sparse bundle is created, refused with a wrong password, contains no plaintext marker after writes, and once closed, writing through a migrated link fails (`make vault-test`, also run in CI on macOS).
 - A chain from a self-made "inspection CA" is rejected and the captured Anthropic chain is accepted (`internal/preflight`).
+- A background Bash command's output does not pass through PostToolUse; it is written to a file under the temp directory that Claude reads later (`scripts/probes/background.py`). Workspace sessions therefore keep commands in the foreground and mask every file they read, wherever it is.
+- After the first complete version, the code was reread from an attacker's side; the sixteen findings and their fixes are listed in [docs/DESIGN.md](docs/DESIGN.md#self-review-findings).
 
-`go test ./...` runs 104 tests, 3 fuzz targets with seed corpora, and property tests with fixed seeds (mask→unmask round trip over 5,000 random documents; six processes writing one token table concurrently; Aho–Corasick against naive search). Detector coverage is 93%.
+`go test ./...` runs 119 tests, 3 fuzz targets with seed corpora, and property tests with fixed seeds (mask→unmask round trip over 5,000 random documents; six processes writing one token table concurrently; Aho–Corasick against naive search). Detector coverage is 93%.
 
 ## Performance
 
@@ -150,20 +152,23 @@ Apple M5 (10 cores), macOS 27, a machine shared with other build jobs. `make ben
 
 | Measurement | Result |
 | --- | --- |
-| Detector, Basic profile, 100 KB mixed text | 0.86 ms (119 MB/s) |
-| Detector, Strict profile, 100 KB mixed text | 10.7 ms (9.6 MB/s) |
-| Strict, same text, with 2,000 previously seen values to re-match | 10.9 ms |
-| Hook process, PreToolUse on `ls` | p50 3.7 ms, p95 4.3 ms |
-| Hook process, PostToolUse on a 100 KB source file (ordinary folder) | p50 5.5 ms, p95 5.9 ms |
-| Hook process, PostToolUse on a 100 KB, ~2,000-row customer CSV (workspace) | p50 78 ms, p95 80 ms |
+| Detector, Basic profile, 100 KB mixed text | 1.1 ms (95 MB/s) |
+| Detector, Strict profile, 100 KB mixed text | 9.0 ms (11 MB/s) |
+| Strict, same text, with 2,000 previously seen values to re-match | 8.9 ms |
+| Hook process, PreToolUse on `ls` | p50 3.7 ms, p95 4.0 ms |
+| Hook process, PostToolUse on a 100 KB source file (ordinary folder) | p50 5.7 ms, p95 6.0 ms |
+| Hook process, PostToolUse on a 100 KB, ~2,000-row customer CSV (workspace) | p50 75 ms, p95 77 ms |
 
-Per-line literal prefilters before each regular expression, and Aho–Corasick for remembered values, took the Strict detector from 97 ms to 10.7 ms and the CSV case from 227 ms to 78 ms. The remaining time in the CSV case is mostly reading and rewriting a token table with thousands of entries.
+Per-line literal prefilters before each regular expression, and Aho–Corasick for remembered values, took the Strict detector from 97 ms to 9 ms and the CSV case from 227 ms to 75 ms. The encoded-content pass (base64 and hex that decode to something sensitive) uses a single byte scan instead of regular expressions; as regular expressions it cost the Basic profile 4 ms per 100 KB. The remaining time in the CSV case is mostly reading and rewriting a token table with thousands of entries.
 
 ## Limitations
 
 Read these before trusting it with anything.
 
 - **Detection is pattern-based.** A name in free prose with no label, title, list or table around it is not found unless you put it in `terms`. Two-character names are not guessed. Amounts need a currency marker, a labelled field or a column header. Numbers your scripts compute and print without a marker (a total, an average) are visible to Claude: the source rows stay masked, the aggregate does not.
+- **Local computation can reveal what it computes.** A script that reads the real files can print any derived form of them, and masking recognises values, not fragments or encodings. ClaudeShield refuses commands that expand placeholders and then encode, slice, hash or compare them, and masks base64 and hex in results that decode to something sensitive, but a script written to extract values piece by piece is not stopped. That is a deliberate-attack scenario (a prompt injection in a file); the defence against it is the OS sandbox, the decision log, and reading what Claude runs.
+- **The scratch directory is plaintext.** Claude Code keeps per-session scratch files, pasted images and background-command output under the system temp folder, outside the vault. Spotlight's index and APFS snapshots can hold older copies of anything that was once plaintext.
+- **Cloud sessions are out of reach.** Claude Code on the web runs on Anthropic's machines and does not load local hooks; a repository opened there is uploaded whole.
 - **Images, PDFs and Office files are refused, not masked**, inside sensitive workspaces. Convert them to text first (`textutil -convert txt file.docx`, `pdftotext file.pdf`).
 - **`@file` mentions bypass tools**, so ClaudeShield refuses prompts with `@` references to existing files in sensitive workspaces and asks you to say "read file.txt" instead.
 - **Failed commands outside a sandboxed workspace are not masked.** Claude Code gives hooks no way to change a failed command's output. Inside a workspace set up by `claudeshield init`, commands are wrapped so failures go through masking; a command that itself calls `exit` still escapes the wrapper.

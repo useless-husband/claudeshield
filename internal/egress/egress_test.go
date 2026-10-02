@@ -170,3 +170,36 @@ func FuzzAnalyzeShell(f *testing.F) {
 		}
 	})
 }
+
+func TestTransformAndClipboard(t *testing.T) {
+	for cmd, want := range map[string]bool{
+		`echo x | base64`:                         true,
+		`cut -c1-3 file.txt`:                      true,
+		`[ "a" = "b" ] && echo yes`:               true,
+		`python3 -c "print(open('f').read()[0])"`: true,
+		`grep -c pattern *.txt`:                   false,
+		`ls -la`:                                  false,
+		`python3 script.py`:                       false,
+		`head -n 5 file`:                          false,
+	} {
+		if got := an(cmd).Transform; got != want {
+			t.Errorf("%q Transform = %v", cmd, got)
+		}
+	}
+	for _, cmd := range []string{`cat secret | pbcopy`, `osascript -e 'tell app "Mail" to send'`} {
+		if r := an(cmd); !r.DataOut || !r.UnknownHost {
+			t.Errorf("%q not treated as outbound: %+v", cmd, r)
+		}
+	}
+}
+
+func TestRedirectTargetsAreRecorded(t *testing.T) {
+	lx := lex(`echo hi > out.txt 2>err.log && cat < in.txt`)
+	var got []string
+	for _, c := range lx.cmds {
+		got = append(got, c.redirects...)
+	}
+	if strings.Join(got, ",") != "out.txt,err.log,in.txt" {
+		t.Fatalf("redirects %v", got)
+	}
+}

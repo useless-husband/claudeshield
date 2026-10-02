@@ -351,7 +351,18 @@ func (c *cli) install(args []string) error {
 	if c.g.Installed != nil {
 		prevAdded = c.g.Installed.AddedEnv
 	}
-	c.g.Installed = &config.InstallRecord{At: now, Executable: target, Settings: app.UserSettings(c.p), Backup: backup, AddedEnv: append(prevAdded, added...)}
+	prevDeny := []string{}
+	if c.g.Installed != nil {
+		prevDeny = c.g.Installed.AddedDeny
+	}
+	c.g.Installed = &config.InstallRecord{At: now, Executable: target, Settings: app.UserSettings(c.p), Backup: backup, AddedEnv: append(prevAdded, added...), AddedDeny: prevDeny}
+	// Keep Claude's file tools, @ mentions and recognised shell file commands
+	// away from the token tables and this configuration.
+	addedDeny, err := settings.EnsureDeny(app.UserSettings(c.p), app.DenyRules(c.p, c.g))
+	if err != nil {
+		return err
+	}
+	c.g.Installed.AddedDeny = append(c.g.Installed.AddedDeny, addedDeny...)
 	if err := config.SaveGlobal(c.p, c.g); err != nil {
 		return err
 	}
@@ -419,10 +430,15 @@ func copyExecutable(src, dst string) error {
 
 func (c *cli) uninstall() error {
 	var added []string
+	var addedDeny []string
 	if c.g.Installed != nil {
 		added = c.g.Installed.AddedEnv
+		addedDeny = c.g.Installed.AddedDeny
 	}
 	if err := settings.Uninstall(app.UserSettings(c.p), added); err != nil {
+		return err
+	}
+	if err := settings.RemoveDeny(app.UserSettings(c.p), addedDeny); err != nil {
 		return err
 	}
 	c.g.Installed = nil
@@ -626,8 +642,22 @@ func (c *cli) vault(args []string) error {
 		if err := vault.Open(c.p, c.g, pw); err != nil {
 			return err
 		}
+		id, err := vault.NewID()
+		if err != nil {
+			return err
+		}
+		if err := vault.WriteMarker(vault.MountPoint(c.p, c.g), id); err != nil {
+			return err
+		}
+		c.g.Vault.ID = id
 		if err := config.SaveGlobal(c.p, c.g); err != nil {
 			return err
+		}
+		if c.g.Installed != nil {
+			if added, err := settings.EnsureDeny(app.UserSettings(c.p), app.DenyRules(c.p, c.g)); err == nil && len(added) > 0 {
+				c.g.Installed.AddedDeny = append(c.g.Installed.AddedDeny, added...)
+				_ = config.SaveGlobal(c.p, c.g)
+			}
 		}
 		fmt.Fprintln(c.out, i18n.Tf("保險箱建立好了，已經打開：%s\n下一步：關掉所有 Claude 視窗，然後 claudeshield vault migrate",
 			"Vault created and open at %s\nNext: close every Claude window, then run `claudeshield vault migrate`", vault.MountPoint(c.p, c.g)))

@@ -33,3 +33,5 @@ claude -p "Run exactly: echo ALPHA. Then read note.txt. Reply with the bash outp
 `{"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}` in the
 scratch directory, and hooks for PreToolUse, PostToolUse and
 PostToolUseFailure on `Bash`.
+
+| `background.py` | Does a background Bash command's output pass through PostToolUse? | No: the result carries only a task id; the output lands in a file under the temp directory that Claude later reads with `Read` |

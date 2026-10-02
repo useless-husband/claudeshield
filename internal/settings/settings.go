@@ -33,6 +33,108 @@ var Events = []struct {
 	{"PreToolUse", "pre-tool", "*", 20},
 	{"PostToolUse", "post-tool", "*", 20},
 	{"MessageDisplay", "display", "", 5},
+	{"ConfigChange", "config-change", "", 10},
+}
+
+// isExactly reports whether h is the handler install writes for one event.
+func isExactly(h map[string]any, exe, arg string) bool {
+	cmd, _ := h["command"].(string)
+	args, _ := h["args"].([]any)
+	return cmd == exe && len(args) == 2 && fmt.Sprint(args[0]) == "hook" && fmt.Sprint(args[1]) == arg
+}
+
+// DenyRules returns the permission rules that keep Claude's file tools and
+// recognised shell file commands away from a directory.
+func DenyRules(dir, home string) []string {
+	p := "//" + strings.TrimPrefix(dir, "/")
+	if home != "" && strings.HasPrefix(dir, home+"/") {
+		p = "~" + dir[len(home):]
+	}
+	return []string{"Read(" + p + "/**)", "Edit(" + p + "/**)"}
+}
+
+// EnsureDeny adds rules to permissions.deny in a settings file and returns
+// the ones that were not there before.
+func EnsureDeny(path string, rules []string) ([]string, error) {
+	m, err := Read(path)
+	if err != nil {
+		return nil, err
+	}
+	perms, _ := m["permissions"].(map[string]any)
+	if perms == nil {
+		perms = map[string]any{}
+	}
+	deny, _ := perms["deny"].([]any)
+	have := map[string]bool{}
+	for _, d := range deny {
+		have[fmt.Sprint(d)] = true
+	}
+	var added []string
+	for _, r := range rules {
+		if !have[r] {
+			deny = append(deny, r)
+			added = append(added, r)
+		}
+	}
+	if len(added) == 0 {
+		return nil, nil
+	}
+	perms["deny"] = deny
+	m["permissions"] = perms
+	return added, Write(path, m)
+}
+
+// RemoveDeny removes the given rules from permissions.deny.
+func RemoveDeny(path string, rules []string) error {
+	m, err := Read(path)
+	if err != nil {
+		return err
+	}
+	perms, _ := m["permissions"].(map[string]any)
+	deny, _ := perms["deny"].([]any)
+	if len(deny) == 0 {
+		return nil
+	}
+	drop := map[string]bool{}
+	for _, r := range rules {
+		drop[r] = true
+	}
+	var keep []any
+	for _, d := range deny {
+		if !drop[fmt.Sprint(d)] {
+			keep = append(keep, d)
+		}
+	}
+	if len(keep) == 0 {
+		delete(perms, "deny")
+	} else {
+		perms["deny"] = keep
+	}
+	if len(perms) == 0 {
+		delete(m, "permissions")
+	}
+	return Write(path, m)
+}
+
+// HasDeny reports which of the rules are missing from permissions.deny.
+func HasDeny(path string, rules []string) []string {
+	m, err := Read(path)
+	if err != nil {
+		return rules
+	}
+	perms, _ := m["permissions"].(map[string]any)
+	deny, _ := perms["deny"].([]any)
+	have := map[string]bool{}
+	for _, d := range deny {
+		have[fmt.Sprint(d)] = true
+	}
+	var missing []string
+	for _, r := range rules {
+		if !have[r] {
+			missing = append(missing, r)
+		}
+	}
+	return missing
 }
 
 // PrivacyEnv are the variables install adds to settings.json's env block:
@@ -220,13 +322,19 @@ func Uninstall(path string, addedEnv []string) error {
 // Installed checks that every event has a claudeshield handler whose
 // executable exists. A missing executable is the dangerous case: Claude Code
 // treats an unstartable hook as a non-blocking error and carries on.
-func Installed(path string) (bool, string) {
+func Installed(path, exe string) (bool, string) {
 	m, err := Read(path)
 	if err != nil {
 		return false, err.Error()
 	}
+	if b, _ := m["disableAllHooks"].(bool); b {
+		return false, "disableAllHooks is set"
+	}
 	hooks, _ := m["hooks"].(map[string]any)
 	var missing []string
+	if st, err := os.Stat(exe); exe == "" || err != nil || st.Mode()&0o111 == 0 {
+		missing = append(missing, exe+" (not executable)")
+	}
 	for _, e := range Events {
 		found := false
 		groups, _ := hooks[e.Name].([]any)
@@ -234,15 +342,7 @@ func Installed(path string) (bool, string) {
 			gm, _ := g.(map[string]any)
 			hl, _ := gm["hooks"].([]any)
 			for _, h := range hl {
-				hm, _ := h.(map[string]any)
-				if hm == nil || !IsOurs(hm) {
-					continue
-				}
-				cmd, _ := hm["command"].(string)
-				if st, err := os.Stat(cmd); err == nil && st.Mode()&0o111 != 0 {
-					found = true
-				} else {
-					missing = append(missing, e.Name+" → "+cmd+" (not executable)")
+				if hm, _ := h.(map[string]any); hm != nil && isExactly(hm, exe, e.Arg) {
 					found = true
 				}
 			}

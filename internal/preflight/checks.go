@@ -169,14 +169,32 @@ func Run(o Options) Report {
 	}
 	if o.HooksInstalled != nil {
 		if ok, detail := o.HooksInstalled(); !ok {
-			r.Findings = append(r.Findings, Finding{ID: "hooks.missing", Severity: Warn,
+			// Without the hooks nothing checks or masks inside the session,
+			// so `claudeshield run` must not start Claude Code.
+			r.Findings = append(r.Findings, Finding{ID: "hooks.missing", Severity: Block, NoAck: true,
 				Title:  i18n.T("ClaudeShield 的 hooks 沒有完整裝進 Claude Code", "ClaudeShield's hooks are not fully installed in Claude Code"),
 				Detail: detail,
 				Fix:    "claudeshield install",
 			})
 		}
 	}
+	r.Findings = append(r.Findings, checkFileVault(o)...)
 	return r
+}
+
+func checkFileVault(o Options) []Finding {
+	out, err := o.RunCmd("fdesetup", "status")
+	if err != nil {
+		return nil
+	}
+	if strings.Contains(out, "FileVault is On") {
+		return []Finding{{ID: "disk.filevault", Severity: Info, Title: i18n.T("FileVault 全碟加密已開啟", "FileVault full-disk encryption is on")}}
+	}
+	return []Finding{{ID: "disk.filevault", Severity: Warn, Fingerprint: "off",
+		Title:  i18n.T("FileVault 全碟加密沒有開", "FileVault full-disk encryption is off"),
+		Detail: i18n.T("保險箱外的檔案（工作資料夾、暫存檔、swap）都是明文；電腦遺失時任何人都讀得到。", "Everything outside the vault (working folders, temp files, swap) is plaintext; anyone with the disk can read it."),
+		Fix:    i18n.T("系統設定 → 隱私權與安全性 → FileVault → 開啟", "System Settings → Privacy & Security → FileVault → Turn On"),
+	}}
 }
 
 func envMap(environ []string) map[string]string {
@@ -191,6 +209,9 @@ func envMap(environ []string) map[string]string {
 
 // envFindings checks one set of variables; origin says where they came from
 // ("the shell", "~/.claude/settings.json", ...).
+// EnvFindings is envFindings for other packages (the ConfigChange hook).
+func EnvFindings(vars map[string]string, origin string) []Finding { return envFindings(vars, origin) }
+
 func envFindings(vars map[string]string, origin string) []Finding {
 	var out []Finding
 	keys := make([]string, 0, len(vars))
@@ -697,6 +718,13 @@ func checkVault(o Options, inWS bool) []Finding {
 		}}
 	}
 	mp := vault.MountPoint(o.Paths, o.Global)
+	if ok, img, err := vault.BackedBy(o.Paths, o.Global); err == nil && !ok {
+		return []Finding{{ID: "vault.spoofed", Severity: Block, NoAck: true,
+			Title:  i18n.Tf("%s 掛載的不是你的保險箱", "The volume at %s is not your vault", mp),
+			Detail: i18n.Tf("實際來源：%s\n預期：%s\n有別的磁碟映像佔用了保險箱的位置，寫進去的對話紀錄不會受到保護。", "Backed by: %s\nExpected: %s\nAnother disk image occupies the vault's mount point; transcripts written there are not protected.", img, o.Global.Vault.Image),
+			Fix:    i18n.Tf("hdiutil detach %q，然後 claudeshield vault open", "hdiutil detach %q, then `claudeshield vault open`", mp),
+		}}
+	}
 	var plain []string
 	for _, d := range append(append([]string(nil), VaultDirs...), VaultFiles...) {
 		p := filepath.Join(o.Paths.ClaudeDir, d)

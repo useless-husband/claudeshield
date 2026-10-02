@@ -94,9 +94,12 @@ type Global struct {
 	// the finding blocks again.
 	Acknowledged map[string]string `json:"acknowledged,omitempty"`
 	Account      AccountState      `json:"account"`
-	Vault        VaultConfig       `json:"vault"`
-	TLS          TLSConfig         `json:"tls"`
-	Installed    *InstallRecord    `json:"installed,omitempty"`
+	// Workspaces lists every folder `claudeshield init` marked, canonical.
+	// A session outside a workspace may not touch its files.
+	Workspaces []string       `json:"workspaces,omitempty"`
+	Vault      VaultConfig    `json:"vault"`
+	TLS        TLSConfig      `json:"tls"`
+	Installed  *InstallRecord `json:"installed,omitempty"`
 }
 
 // AccountState records the user's own confirmation of a setting claudeshield
@@ -109,6 +112,9 @@ type AccountState struct {
 type VaultConfig struct {
 	Image  string `json:"image,omitempty"`  // path to the .sparsebundle
 	Volume string `json:"volume,omitempty"` // volume name, mounted at /Volumes/<name>
+	// ID is a random value written to a marker file inside the vault when it
+	// is created; a volume mounted at the same path without it is not the vault.
+	ID string `json:"id,omitempty"`
 }
 
 // TLSConfig lists hosts to verify and extra trusted root pins.
@@ -124,6 +130,7 @@ type InstallRecord struct {
 	Settings   string    `json:"settings"`
 	Backup     string    `json:"backup"`
 	AddedEnv   []string  `json:"added_env,omitempty"`
+	AddedDeny  []string  `json:"added_deny,omitempty"`
 }
 
 // ShowRealValues reports whether replies are displayed with real values.

